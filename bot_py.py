@@ -59,7 +59,7 @@ CLUBS_DB = {
 TOURNAMENT_NAME, TOURNAMENT_ROUNDS, TOURNAMENT_PRIZE, ADD_PLAYER_NAME, ADD_PLAYERS_LIST = range(5)
 
 
-DB_PATH = os.getenv("LEAGUE_DB", "league.db")
+DB_PATH = os.getenv("LEAGUE_DB", "league_v3.db")
 
 def db():
     conn = sqlite3.connect(DB_PATH)
