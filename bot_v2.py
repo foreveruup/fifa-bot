@@ -24,9 +24,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# -------------------------
-# Встроенная база клубов
-# -------------------------
+
 CLUBS_DB = {
     "England": [
         "Newcastle United", "Tottenham Hotspur", "Chelsea", "Arsenal", "Liverpool",
@@ -57,14 +55,10 @@ CLUBS_DB = {
     ]
 }
 
-# -------------------------
-# States for conversation
-# -------------------------
+
 TOURNAMENT_NAME, TOURNAMENT_ROUNDS, TOURNAMENT_PRIZE, ADD_PLAYER_NAME, ADD_PLAYERS_LIST = range(5)
 
-# -------------------------
-# Подключение к базе данных
-# -------------------------
+
 DB_PATH = os.getenv("LEAGUE_DB", "league_v3.db")
 
 def db():
@@ -113,9 +107,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# -------------------------
-# Утилиты
-# -------------------------
+
 def get_active_tournament(chat_id: int) -> Optional[sqlite3.Row]:
     conn = db()
     c = conn.cursor()
@@ -128,10 +120,9 @@ def add_tournament(chat_id: int, name: str, prize: str, rounds: int) -> int:
     conn = db()
     c = conn.cursor()
     
-    # Сначала завершаем все старые турниры в этом чате
     c.execute("UPDATE tournaments SET active=0 WHERE chat_id=?", (chat_id,))
     
-    # Удаляем все старые матчи и игроков из предыдущих турниров этого чата
+  
     tournament_ids = c.execute("SELECT id FROM tournaments WHERE chat_id=?", (chat_id,)).fetchall()
     for tid in tournament_ids:
         c.execute("DELETE FROM matches WHERE tournament_id=?", (tid['id'],))
@@ -219,14 +210,11 @@ def assign_random_clubs(tournament_id: int):
     conn.commit()
     conn.close()
 
-# -------------------------
-# Генерация расписания
-# -------------------------
+
 def generate_schedule(tournament_id: int, rounds: int):
     conn = db()
     c = conn.cursor()
     
-    # Удаляем все старые матчи этого турнира перед генерацией новых
     c.execute("DELETE FROM matches WHERE tournament_id=?", (tournament_id,))
     
     players = get_players(tournament_id)
@@ -273,9 +261,7 @@ def record_result(tournament_id: int, match_id: int, hg: int, ag: int):
     conn.commit()
     conn.close()
 
-# -------------------------
-# Таблица
-# -------------------------
+
 def get_standings(tournament_id: int) -> List[tuple]:
     players = get_players(tournament_id)
     table = {p["name"]: {"P":0, "W":0, "D":0, "L":0, "GF":0, "GA":0, "GD":0, "PTS":0} for p in players}
@@ -371,9 +357,7 @@ def get_match_by_id(tournament_id: int, match_id: int) -> Optional[sqlite3.Row]:
     conn.close()
     return row
 
-# -------------------------
-# Шутки про приз
-# -------------------------
+
 def get_funny_message(ordered: List[tuple], prize: str) -> Optional[str]:
     if not ordered:
         return None
@@ -386,9 +370,6 @@ def get_funny_message(ordered: List[tuple], prize: str) -> Optional[str]:
     else:
         return f"🔥 Борьба за {prize} накаляется!"
 
-# -------------------------
-# UI кнопки
-# -------------------------
 def get_main_menu_keyboard():
     keyboard = [
         [InlineKeyboardButton("🆕 Новый турнир", callback_data="new_tournament")],
@@ -408,7 +389,7 @@ def get_players_keyboard(tournament_id: int):
     keyboard = []
     players_without_clubs = get_players_without_clubs(tournament_id)
     
-    # Разбиваем на строки по 2 кнопки
+    
     for i in range(0, len(players_without_clubs), 2):
         row = []
         for j in range(i, min(i + 2, len(players_without_clubs))):
@@ -423,7 +404,7 @@ def get_players_keyboard(tournament_id: int):
 def get_countries_keyboard():
     keyboard = []
     countries = list(CLUBS_DB.keys())
-    # Разбиваем на строки по 2 кнопки
+    
     for i in range(0, len(countries), 2):
         row = []
         for j in range(i, min(i + 2, len(countries))):
@@ -437,7 +418,7 @@ def get_countries_keyboard():
 def get_clubs_keyboard(country: str, player_name: str):
     keyboard = []
     clubs = CLUBS_DB.get(country, [])
-    # Разбиваем на строки по 2 кнопки
+    
     for i in range(0, len(clubs), 2):
         row = []
         for j in range(i, min(i + 2, len(clubs))):
@@ -450,7 +431,7 @@ def get_clubs_keyboard(country: str, player_name: str):
 def get_matches_keyboard(tournament_id: int, unplayed_only: bool = True):
     """Клавиатура для выбора матча"""
     keyboard = []
-    matches = get_schedule(tournament_id, 100)  # Показываем до 100 матчей (все матчи)
+    matches = get_schedule(tournament_id, 100) 
     
     if unplayed_only:
         matches = [m for m in matches if not m['played']]
@@ -502,9 +483,6 @@ def get_country_flag(country: str) -> str:
     }
     return flags.get(country, "⚽")
 
-# -------------------------
-# Telegram команды и обработчики
-# -------------------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -519,7 +497,6 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_main_menu_keyboard()
     )
 
-# Обработчик кнопок
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -564,7 +541,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif data.startswith("select_match_"):
-        match_id = int(data[13:])  # убираем "select_match_"
+        match_id = int(data[13:]) 
         t = get_active_tournament(chat_id)
         if not t:
             await query.edit_message_text(
@@ -592,7 +569,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif data.startswith("score_"):
-        parts = data[6:].split("_", 3)  # убираем "score_" и разделяем
+        parts = data[6:].split("_", 3)  
         match_id = int(parts[0])
         player_name = parts[1]
         goals = int(parts[2])
@@ -605,14 +582,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Сохраняем количество голов для игрока
+       
         if 'match_scores' not in context.user_data:
             context.user_data['match_scores'] = {}
         context.user_data['match_scores'][player_name] = goals
         
-        # Проверяем, нужно ли спросить про второго игрока
+        
         if len(context.user_data['match_scores']) == 1:
-            # Спрашиваем про второго игрока
             other_player = match['away'] if player_name == match['home'] else match['home']
             await query.edit_message_text(
                 f"⚽ Матч: {match['home']} vs {match['away']}\n"
@@ -621,7 +597,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=get_score_keyboard(match_id, other_player)
             )
         else:
-            # У нас есть результат для обоих игроков
+            
             home_goals = context.user_data['match_scores'].get(match['home'], 0)
             away_goals = context.user_data['match_scores'].get(match['away'], 0)
             
@@ -629,12 +605,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if t:
                 record_result(t['id'], match_id, home_goals, away_goals)
                 
-                # Очищаем данные
+                
                 context.user_data.pop('selected_match_id', None)
                 context.user_data.pop('selected_match', None)
                 context.user_data.pop('match_scores', None)
                 
-                # Показываем обновленную таблицу
+                
                 ordered = get_standings(t['id'])
                 prize = get_active_tournament_prize(t['id'])
                 msg = format_table(t['id'], ordered)
