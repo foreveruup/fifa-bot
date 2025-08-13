@@ -12,6 +12,7 @@ from telegram import (
     Update,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    ChatMember,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -55,9 +56,52 @@ CLUBS_DB = {
     ]
 }
 
+# Смешные комментарии для результатов
+MATCH_COMMENTS = [
+    "Голы летели как горох по стене! 🏐",
+    "Вратари сегодня явно забыли перчатки дома! 🥅", 
+    "Защитники играли как будто их не существует! 👻",
+    "Этот матч войдет в историю... или нет 📚",
+    "Кто-то явно переборщил с энергетиками! ⚡",
+    "Футбол - непредсказуемая игра, особенно когда играют эти двое! 🎲",
+    "Голкипер смотрел на мяч как на НЛО! 🛸",
+    "Тактика 'все в атаку' сработала на все 100%! 🚀",
+    "Защита дырявее чем швейцарский сыр! 🧀",
+    "Мяч в воротах чаще чем пицца в пятницу! 🍕",
+    "Кажется, кто-то перепутал футбол с хоккеем по голам! 🏒",
+    "Вратарь сегодня больше зритель чем игрок! 👀",
+    "Голы сыпались как дождь в октябре! ☔",
+    "Оборона работала в режиме 'только для красоты'! 💅",
+    "Этот счет видали только в FIFA на легком уровне! 🎮"
+]
+
+LOW_SCORE_COMMENTS = [
+    "Нулевка! Вратари сегодня - стена! 🧱",
+    "Скучновато... может быть кофе поможет? ☕",
+    "Голов меньше чем пальцев на одной руке! ✋",
+    "Классическая английская погода на поле - серо и уныло! 🌫️",
+    "Защитники сегодня как крепостные стены! 🏰",
+    "Счет как в шахматах - думают долго, результат скромный! ♟️",
+    "Мяч в воротах реже чем комплименты от тренера! 😤"
+]
+
+HIGH_SCORE_COMMENTS = [
+    "Пушки стреляли без перерыва! 💥",
+    "Голов больше чем в новогоднюю ночь салютов! 🎆",
+    "Вратарь работал как дворник после листопада! 🍂",
+    "Сетки рвутся от такой канонады! 🕳️",
+    "Кто-то забыл включить защиту в настройках! ⚙️"
+]
+
+DRAW_COMMENTS = [
+    "Ничья! Справедливость восторжествовала! ⚖️",
+    "Поделили очки как хорошие друзья! 🤝",
+    "1:1 - счет дипломатов! 🤵",
+    "Никто не хотел быть плохим парнем! 😇",
+    "Ничья - это когда оба хороши или оба так себе! 🤷‍♂️"
+]
 
 TOURNAMENT_NAME, TOURNAMENT_ROUNDS, TOURNAMENT_PRIZE, ADD_PLAYER_NAME, ADD_PLAYERS_LIST = range(5)
-
 
 DB_PATH = os.getenv("LEAGUE_DB", "league_v3.db")
 
@@ -81,7 +125,6 @@ def init_db():
         active INTEGER DEFAULT 1
     );
     """)
-    # Игроки
     c.execute("""
     CREATE TABLE IF NOT EXISTS players (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,11 +134,11 @@ def init_db():
         FOREIGN KEY(tournament_id) REFERENCES tournaments(id)
     );
     """)
-    # Матчи
     c.execute("""
     CREATE TABLE IF NOT EXISTS matches (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         tournament_id INTEGER NOT NULL,
+        match_number INTEGER NOT NULL,
         home TEXT NOT NULL,
         away TEXT NOT NULL,
         home_goals INTEGER,
@@ -104,9 +147,34 @@ def init_db():
         FOREIGN KEY(tournament_id) REFERENCES tournaments(id)
     );
     """)
+    
+    c.execute("PRAGMA table_info(matches)")
+    columns = [row[1] for row in c.fetchall()]
+    if 'match_number' not in columns:
+        c.execute("ALTER TABLE matches ADD COLUMN match_number INTEGER DEFAULT 0")
+        # Обновляем существующие записи
+        c.execute("""
+        UPDATE matches 
+        SET match_number = id 
+        WHERE match_number IS NULL OR match_number = 0
+        """)
+    
     conn.commit()
     conn.close()
 
+async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Проверяет, является ли пользователь администратором группы"""
+    chat = update.effective_chat
+    user = update.effective_user
+    
+    if chat.type == 'private':
+        return True
+    
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        return member.status in [ChatMember.CREATOR, ChatMember.ADMINISTRATOR]
+    except:
+        return False
 
 def get_active_tournament(chat_id: int) -> Optional[sqlite3.Row]:
     conn = db()
@@ -122,16 +190,12 @@ def add_tournament(chat_id: int, name: str, prize: str, rounds: int) -> int:
     
     c.execute("UPDATE tournaments SET active=0 WHERE chat_id=?", (chat_id,))
     
-  
     tournament_ids = c.execute("SELECT id FROM tournaments WHERE chat_id=?", (chat_id,)).fetchall()
     for tid in tournament_ids:
         c.execute("DELETE FROM matches WHERE tournament_id=?", (tid['id'],))
         c.execute("DELETE FROM players WHERE tournament_id=?", (tid['id'],))
     
-    # Сбрасываем автоинкремент для таблицы matches
-    c.execute("DELETE FROM sqlite_sequence WHERE name='matches'")
     
-    # Создаем новый турнир
     c.execute("""
     INSERT INTO tournaments (chat_id, name, prize, rounds, created_at, active)
     VALUES (?, ?, ?, ?, ?, 1)
@@ -210,7 +274,6 @@ def assign_random_clubs(tournament_id: int):
     conn.commit()
     conn.close()
 
-
 def generate_schedule(tournament_id: int, rounds: int):
     conn = db()
     c = conn.cursor()
@@ -224,7 +287,7 @@ def generate_schedule(tournament_id: int, rounds: int):
     # Генерируем все пары для каждого круга
     for r in range(rounds):
         for i in range(len(names)):
-            for j in range(i + 1, len(names)):  # Только уникальные пары
+            for j in range(i + 1, len(names)):  
                 if r % 2 == 0:
                     matches.append((names[i], names[j]))
                 else:
@@ -232,9 +295,10 @@ def generate_schedule(tournament_id: int, rounds: int):
     
     random.shuffle(matches)
     
-    for home, away in matches:
-        c.execute("INSERT INTO matches (tournament_id, home, away) VALUES (?, ?, ?)",
-                  (tournament_id, home, away))
+    # Добавляем матчи с правильной нумерацией начиная с 1
+    for match_num, (home, away) in enumerate(matches, start=1):
+        c.execute("INSERT INTO matches (tournament_id, match_number, home, away) VALUES (?, ?, ?, ?)",
+                  (tournament_id, match_num, home, away))
     conn.commit()
     conn.close()
 
@@ -243,12 +307,11 @@ def get_schedule(tournament_id: int, limit: int = None) -> List[sqlite3.Row]:
     c = conn.cursor()
     c.execute("""
     SELECT * FROM matches
-    WHERE tournament_id=? ORDER BY played ASC, id ASC
+    WHERE tournament_id=? ORDER BY played ASC, match_number ASC
     """ + ("LIMIT ?" if limit else ""), (tournament_id,) + ((limit,) if limit else ()))
     rows = c.fetchall()
     conn.close()
     return rows
-
 
 def record_result(tournament_id: int, match_id: int, hg: int, ag: int):
     conn = db()
@@ -260,7 +323,6 @@ def record_result(tournament_id: int, match_id: int, hg: int, ag: int):
     """, (hg, ag, tournament_id, match_id))
     conn.commit()
     conn.close()
-
 
 def get_standings(tournament_id: int) -> List[tuple]:
     players = get_players(tournament_id)
@@ -293,19 +355,29 @@ def get_standings(tournament_id: int) -> List[tuple]:
     return ordered
 
 def format_table(tournament_id: int, ordered: List[tuple]) -> str:
+    """Улучшенное форматирование таблицы для мобильных устройств"""
     lines = []
-    header = f"{'#':>2} {'Игрок':<12} {'И':>2} {'В':>2} {'Н':>2} {'П':>2} {'З':>2} {'П':>2} {'±':>3} {'О':>2}"
+    
+    # Более компактный заголовок
+    header = f"{'#':<2}{'Игрок':<10}{'И':<2}{'В':<2}{'Н':<2}{'П':<2}{'±':<3}{'О':<2}"
     lines.append(header)
-    lines.append("-"*len(header))
+    lines.append("─" * len(header))
+    
     for i, (name, st) in enumerate(ordered, start=1):
         club = get_player_club(tournament_id, name)
-        
         short_club = get_short_club_name(club) if club else ""
-        display_name = f"{name}({short_club})" if short_club else name
         
-        if len(display_name) > 12:
-            display_name = display_name[:11] + "."
-        lines.append(f"{i:>2} {display_name:<12} {st['P']:>2} {st['W']:>2} {st['D']:>2} {st['L']:>2} {st['GF']:>2} {st['GA']:>2} {st['GD']:>3} {st['PTS']:>2}")
+        # Сокращаем имя игрока для мобильного отображения
+        if club:
+            display_name = f"{name[:6]}({short_club})" if len(name) > 6 else f"{name}({short_club})"
+        else:
+            display_name = name[:9]
+        
+        if len(display_name) > 10:
+            display_name = display_name[:9] + "."
+            
+        lines.append(f"{i:<2}{display_name:<10}{st['P']:<2}{st['W']:<2}{st['D']:<2}{st['L']:<2}{st['GD']:>3}{st['PTS']:<2}")
+    
     return "```\n" + "\n".join(lines) + "\n```"
 
 def get_active_tournament_prize(tournament_id: int) -> str:
@@ -357,38 +429,82 @@ def get_match_by_id(tournament_id: int, match_id: int) -> Optional[sqlite3.Row]:
     conn.close()
     return row
 
+def get_funny_match_comment(home_goals: int, away_goals: int) -> str:
+    """Генерирует смешной комментарий по результату матча"""
+    total_goals = home_goals + away_goals
+    
+    if home_goals == away_goals:
+        return random.choice(DRAW_COMMENTS)
+    elif total_goals >= 6:
+        return random.choice(HIGH_SCORE_COMMENTS)
+    elif total_goals <= 1:
+        return random.choice(LOW_SCORE_COMMENTS)
+    else:
+        return random.choice(MATCH_COMMENTS)
 
 def get_funny_message(ordered: List[tuple], prize: str) -> Optional[str]:
+    """Обновленная функция с более интересными комментариями"""
     if not ordered:
         return None
+    
     top_score = ordered[0][1]['PTS']
     leaders = [name for name, st in ordered if st['PTS'] == top_score]
+    
+    leader_messages = [
+        f"👑 {leaders[0]} правит балом! {prize} уже пахнет победой!",
+        f"🔥 {leaders[0]} в огне! Остальные курят в сторонке!",
+        f"⚡ {leaders[0]} на коне! {prize} почти в кармане!",
+        f"🚀 {leaders[0]} летит к {prize} как ракета!",
+        f"👏 {leaders[0]} показывает класс! {prize} ждет своего героя!"
+    ]
+    
+    tie_messages = [
+        f"🤝 {leaders[0]} и {leaders[1]} не могут определиться! {prize} в подвешенном состоянии!",
+        f"⚔️ {leaders[0]} против {leaders[1]}! Битва за {prize} накаляется!",
+        f"🎭 {' VS '.join(leaders)} - драма достойная Оскара! {prize} ждет!",
+        f"🔥 Дуэль века: {' и '.join(leaders)}! {prize} дрожит от напряжения!"
+    ]
+    
+    chaos_messages = [
+        f"🌪️ Полный хаос в турнире! {len(leaders)} претендентов на {prize}!",
+        f"🎪 Цирк продолжается! {len(leaders)} клоунов борются за {prize}!",
+        f"🍯 {prize} привлекает {len(leaders)} пчел! Кто первый доберется?",
+        f"🎲 Кубик брошен! {len(leaders)} игроков в игре за {prize}!"
+    ]
+    
     if len(leaders) == 1:
-        return f"⚡ {leaders[0]} лидирует и уже чует запах победы за {prize}!"
+        return random.choice(leader_messages)
     elif len(leaders) == 2:
-        return f"🤝 {leaders[0]} и {leaders[1]} делят лидерство! Может, {prize} будет на двоих?"
+        return random.choice(tie_messages)
     else:
-        return f"🔥 Борьба за {prize} накаляется!"
+        return random.choice(chaos_messages)
 
-def get_main_menu_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("🆕 Новый турнир", callback_data="new_tournament")],
+def get_main_menu_keyboard(is_admin: bool = True):
+    """Клавиатура с учетом прав пользователя"""
+    keyboard = []
+    
+    if is_admin:
+        keyboard.append([InlineKeyboardButton("🆕 Новый турнир", callback_data="new_tournament")])
+    
+    keyboard.extend([
         [InlineKeyboardButton("👥 Добавить игрока", callback_data="add_player"),
          InlineKeyboardButton("👥+ Добавить списком", callback_data="add_players_list")],
         [InlineKeyboardButton("⚽ Назначить клубы", callback_data="assign_clubs_menu")],
         [InlineKeyboardButton("📅 Генерировать расписание", callback_data="generate_schedule")],
         [InlineKeyboardButton("📋 Расписание", callback_data="show_schedule"),
          InlineKeyboardButton("⚽ Записать результат", callback_data="record_result")],
-        [InlineKeyboardButton("📊 Таблица", callback_data="show_table")],
-        [InlineKeyboardButton("🏆 Завершить турнир", callback_data="end_tournament")]
-    ]
+        [InlineKeyboardButton("📊 Таблица", callback_data="show_table")]
+    ])
+    
+    if is_admin:
+        keyboard.append([InlineKeyboardButton("🏆 Завершить турнир", callback_data="end_tournament")])
+    
     return InlineKeyboardMarkup(keyboard)
 
 def get_players_keyboard(tournament_id: int):
     """Клавиатура для выбора игрока для назначения клуба"""
     keyboard = []
     players_without_clubs = get_players_without_clubs(tournament_id)
-    
     
     for i in range(0, len(players_without_clubs), 2):
         row = []
@@ -444,11 +560,14 @@ def get_matches_keyboard(tournament_id: int, unplayed_only: bool = True):
         hg = match['home_goals'] if match['home_goals'] is not None else "-"
         ag = match['away_goals'] if match['away_goals'] is not None else "-"
         
-        match_text = f"{status} {match['home']} vs {match['away']} [{hg}:{ag}]"
-        if len(match_text) > 35:  # Обрезаем длинный текст
-            home_short = match['home'][:8] if len(match['home']) > 8 else match['home']
-            away_short = match['away'][:8] if len(match['away']) > 8 else match['away']
-            match_text = f"{status} {home_short} vs {away_short} [{hg}:{ag}]"
+        # Используем match_number вместо id для отображения
+        match_num = match.get('match_number', match['id'])
+        match_text = f"{status} #{match_num}: {match['home']} vs {match['away']} [{hg}:{ag}]"
+        
+        if len(match_text) > 40:  # Обрезаем для мобильных
+            home_short = match['home'][:7] if len(match['home']) > 7 else match['home']
+            away_short = match['away'][:7] if len(match['away']) > 7 else match['away']
+            match_text = f"{status} #{match_num}: {home_short}-{away_short} [{hg}:{ag}]"
         
         keyboard.append([InlineKeyboardButton(match_text, callback_data=f"select_match_{match['id']}")])
     
@@ -458,8 +577,8 @@ def get_matches_keyboard(tournament_id: int, unplayed_only: bool = True):
 def get_score_keyboard(match_id: int, player_name: str):
     """Клавиатура для выбора количества голов"""
     keyboard = []
-    # Добавляем кнопки с числами голов от 0 до 10
-    for i in range(0, 11, 5):  # Разбиваем по 5 кнопок в ряд
+    
+    for i in range(0, 21, 5): 
         row = []
         for j in range(i, min(i + 5, 11)):
             row.append(InlineKeyboardButton(str(j), callback_data=f"score_{match_id}_{player_name}_{j}"))
@@ -485,16 +604,18 @@ def get_country_flag(country: str) -> str:
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_is_admin = await is_admin(update, context)
     await update.message.reply_text(
         "⚽ Добро пожаловать в Tournament Manager!\n\n"
         "Управляйте турниром с помощью кнопок ниже:",
-        reply_markup=get_main_menu_keyboard()
+        reply_markup=get_main_menu_keyboard(user_is_admin)
     )
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_is_admin = await is_admin(update, context)
     await update.message.reply_text(
         "⚽ Меню управления турниром:",
-        reply_markup=get_main_menu_keyboard()
+        reply_markup=get_main_menu_keyboard(user_is_admin)
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -503,14 +624,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     data = query.data
     chat_id = update.effective_chat.id
+    user_is_admin = await is_admin(update, context)
     
     if data == "main_menu":
         await query.edit_message_text(
             "⚽ Меню управления турниром:",
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(user_is_admin)
         )
     
     elif data == "new_tournament":
+        if not user_is_admin:
+            await query.edit_message_text(
+                "❌ Только администраторы группы могут создавать турниры.",
+                reply_markup=get_main_menu_keyboard(user_is_admin)
+            )
+            return
         await query.edit_message_text("Введите название турнира:")
         context.user_data['stage'] = 'tournament_name'
     
@@ -519,7 +647,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t:
             await query.edit_message_text(
                 "❌ Нет активного турнира. Создайте новый турнир.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         await query.edit_message_text("Введите имена игроков через запятую:\nПример: Амир, Диас, Влад")
@@ -530,7 +658,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t:
             await query.edit_message_text(
                 "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         
@@ -546,7 +674,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t:
             await query.edit_message_text(
                 "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         
@@ -554,7 +682,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not match:
             await query.edit_message_text(
                 "❌ Матч не найден.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         
@@ -562,8 +690,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['selected_match'] = match
         context.user_data['match_scores'] = {}
         
+        match_num = match.get('match_number', match['id'])
         await query.edit_message_text(
-            f"⚽ Матч: {match['home']} vs {match['away']}\n\n"
+            f"⚽ Матч #{match_num}: {match['home']} vs {match['away']}\n\n"
             f"Сколько голов забил {match['home']}?",
             reply_markup=get_score_keyboard(match_id, match['home'])
         )
@@ -578,26 +707,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not match:
             await query.edit_message_text(
                 "❌ Ошибка: матч не выбран.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         
-       
         if 'match_scores' not in context.user_data:
             context.user_data['match_scores'] = {}
         context.user_data['match_scores'][player_name] = goals
         
+        match_num = match.get('match_number', match['id'])
         
         if len(context.user_data['match_scores']) == 1:
             other_player = match['away'] if player_name == match['home'] else match['home']
             await query.edit_message_text(
-                f"⚽ Матч: {match['home']} vs {match['away']}\n"
+                f"⚽ Матч #{match_num}: {match['home']} vs {match['away']}\n"
                 f"✅ {player_name}: {goals} голов\n\n"
                 f"Сколько голов забил {other_player}?",
                 reply_markup=get_score_keyboard(match_id, other_player)
             )
         else:
-            
             home_goals = context.user_data['match_scores'].get(match['home'], 0)
             away_goals = context.user_data['match_scores'].get(match['away'], 0)
             
@@ -605,11 +733,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if t:
                 record_result(t['id'], match_id, home_goals, away_goals)
                 
-                
                 context.user_data.pop('selected_match_id', None)
                 context.user_data.pop('selected_match', None)
                 context.user_data.pop('match_scores', None)
                 
+                match_comment = get_funny_match_comment(home_goals, away_goals)
                 
                 ordered = get_standings(t['id'])
                 prize = get_active_tournament_prize(t['id'])
@@ -618,14 +746,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 result_text = (
                     f"✅ Результат записан!\n"
-                    f"⚽ {match['home']} {home_goals}:{away_goals} {match['away']}\n\n"
+                    f"⚽ Матч #{match_num}: {match['home']} {home_goals}:{away_goals} {match['away']}\n\n"
+                    f"{match_comment}\n\n"
                     f"{msg}"
                 )
                 
                 await query.edit_message_text(
                     result_text,
                     parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=get_main_menu_keyboard()
+                    reply_markup=get_main_menu_keyboard(user_is_admin)
                 )
                 
                 if fun:
@@ -636,7 +765,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t:
             await query.edit_message_text(
                 "❌ Нет активного турнира. Создайте новый турнир.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         await query.edit_message_text("Введите имя игрока:")
@@ -647,7 +776,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t:
             await query.edit_message_text(
                 "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         
@@ -655,7 +784,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not players_without_clubs:
             await query.edit_message_text(
                 "✅ Всем игрокам уже назначены клубы!",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         
@@ -672,7 +801,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not player:
             await query.edit_message_text(
                 "❌ Игрок не найден.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         
@@ -695,7 +824,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif data.startswith("country_"):
-        country = data[8:]  # убираем "country_"
+        country = data[8:]  
         player_name = context.user_data.get('selected_player_name', 'игрок')
         context.user_data['selected_country'] = country
         
@@ -707,7 +836,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif data.startswith("assign_club_"):
-        parts = data[12:].split("_", 1)  # убираем "assign_club_" и разделяем
+        parts = data[12:].split("_", 1)  
         country = parts[0]
         club = parts[1]
         
@@ -717,7 +846,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not player_id or not player_name:
             await query.edit_message_text(
                 "❌ Ошибка: игрок не выбран.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         
@@ -725,7 +854,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t:
             await query.edit_message_text(
                 "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         
@@ -750,7 +879,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"✅ {player_name} назначен клуб {get_country_flag(country)} {club}!\n\n"
                 "🎉 Всем игрокам назначены клубы! Можете генерировать расписание.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
     
     elif data == "assign_random":
@@ -758,13 +887,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t:
             await query.edit_message_text(
                 "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         assign_random_clubs(t['id'])
         await query.edit_message_text(
             "🎲 Клубы назначены случайно!",
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(user_is_admin)
         )
     
     elif data == "generate_schedule":
@@ -772,13 +901,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t:
             await query.edit_message_text(
                 "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         generate_schedule(t['id'], t['rounds'])
         await query.edit_message_text(
             "📅 Расписание сгенерировано!",
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(user_is_admin)
         )
     
     elif data == "show_schedule":
@@ -786,14 +915,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t:
             await query.edit_message_text(
                 "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         sched = get_schedule(t['id'])
         if not sched:
             await query.edit_message_text(
                 "📋 Нет матчей. Сгенерируйте расписание.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         
@@ -802,17 +931,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status = "✅" if m['played'] else "⏳"
             hg = m['home_goals'] if m['home_goals'] is not None else "-"
             ag = m['away_goals'] if m['away_goals'] is not None else "-"
-            lines.append(f"{status} {m['id']}: {m['home']} vs {m['away']} [{hg}:{ag}]")
+            match_num = m.get('match_number', m['id'])
+            
+            # Сокращаем имена для мобильного отображения
+            home_short = m['home'][:8] if len(m['home']) > 8 else m['home']
+            away_short = m['away'][:8] if len(m['away']) > 8 else m['away']
+            
+            lines.append(f"{status} #{match_num}: {home_short} vs {away_short} [{hg}:{ag}]")
         
         message_text = "\n".join(lines)
-        await query.edit_message_text(message_text, reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text(message_text, reply_markup=get_main_menu_keyboard(user_is_admin))
     
     elif data == "show_table":
         t = get_active_tournament(chat_id)
         if not t:
             await query.edit_message_text(
                 "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         ordered = get_standings(t['id'])
@@ -820,15 +955,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"📊 ТУРНИРНАЯ ТАБЛИЦА:\n\n{msg}",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(user_is_admin)
         )
     
     elif data == "end_tournament":
+        if not user_is_admin:
+            await query.edit_message_text(
+                "❌ Только администраторы группы могут завершать турниры.",
+                reply_markup=get_main_menu_keyboard(user_is_admin)
+            )
+            return
+            
         t = get_active_tournament(chat_id)
         if not t:
             await query.edit_message_text(
                 "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         ordered = get_standings(t['id'])
@@ -836,11 +978,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         winner = ordered[0][0] if ordered else "никто"
         prize = get_active_tournament_prize(t['id'])
         msg = format_table(t['id'], ordered)
+        
+        winner_messages = [
+            f"🎊 Барабанная дробь... Победитель — {winner}!",
+            f"👑 {winner} — новый король турнира!",
+            f"🏆 {winner} забирает {prize} домой!",
+            f"⚡ {winner} — гений футбола!"
+        ]
+        
+        winner_msg = random.choice(winner_messages)
+        
         await query.edit_message_text(
             f"🏆 Турнир '{t['name']}' окончен!\n"
-            f"Победитель — {winner}! {prize} достается ему!\n\n{msg}",
+            f"{winner_msg}\n\n{msg}",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(user_is_admin)
         )
 
 # Обработчик текстовых сообщений
@@ -851,6 +1003,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stage = context.user_data['stage']
     text = update.message.text.strip()
     chat_id = update.effective_chat.id
+    user_is_admin = await is_admin(update, context)
 
     if stage == 'tournament_name':
         context.user_data['new_tournament'] = {'name': text}
@@ -880,7 +1033,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🏆 Приз: {prize}\n"
             f"🔄 Кругов: {context.user_data['new_tournament']['rounds']}\n\n"
             "Теперь добавляйте игроков и назначайте им клубы:",
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(user_is_admin)
         )
     
     elif stage == 'add_player_name':
@@ -888,7 +1041,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t:
             await update.message.reply_text(
                 "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         
@@ -897,7 +1050,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             f"✅ Игрок {text} добавлен в турнир!",
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(user_is_admin)
         )
     
     elif stage == 'add_players_list':
@@ -905,7 +1058,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t:
             await update.message.reply_text(
                 "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         
@@ -916,7 +1069,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "❌ Не найдено имен игроков. Попробуйте еще раз.\n"
                 "Пример: Амир, Диас, Влад",
-                reply_markup=get_main_menu_keyboard()
+                reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
         
@@ -932,7 +1085,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Добавлено игроков: {added_count}\n"
             f"👥 Список: {', '.join(player_names[:10])}{'...' if len(player_names) > 10 else ''}",
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_main_menu_keyboard(user_is_admin)
         )
 
 # Команда для записи результата (остается текстовой для удобства)
@@ -954,13 +1107,16 @@ async def cmd_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hg, ag = int(score[0]), int(score[1])
         record_result(t['id'], match_id, hg, ag)
         
+        # Добавляем смешной комментарий
+        match_comment = get_funny_match_comment(hg, ag)
+        
         ordered = get_standings(t['id'])
         prize = get_active_tournament_prize(t['id'])
         msg = format_table(t['id'], ordered)
         fun = get_funny_message(ordered, prize)
         
         await update.message.reply_text(
-            f"✅ Результат записан!\n\n{msg}",
+            f"✅ Результат записан!\n{match_comment}\n\n{msg}",
             parse_mode=ParseMode.MARKDOWN
         )
         if fun:
