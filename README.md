@@ -14,7 +14,7 @@
 
 ## Установка
 1. Установите Python 3.10+.
-2. Скачайте `bot_v3.py` и `requirements.txt` в одну папку.
+2. Скачайте `bot_.py` и `requirements.txt` в одну папку.
 3. Установите зависимости:
    ```bash
    pip install -r requirements.txt
