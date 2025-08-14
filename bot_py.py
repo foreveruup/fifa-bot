@@ -363,11 +363,11 @@ def get_standings(tournament_id: int) -> List[tuple]:
     return ordered
 
 def format_table(tournament_id: int, ordered: List[tuple]) -> str:
-    """Улучшенное форматирование таблицы для мобильных устройств"""
+    """ИСПРАВЛЕННОЕ форматирование таблицы с правильными отступами"""
     lines = []
     
-    # Более компактный заголовок
-    header = f"{'#':<2}{'Игрок':<10}{'И':<2}{'В':<2}{'Н':<2}{'П':<2}{'±':<3}{'О':<2}"
+    # Заголовок с правильными отступами - добавили пробел между ± и О
+    header = f"{'#':<2}{'Игрок':<10}{'И':<2}{'В':<2}{'Н':<2}{'П':<2}{'±':<4}{'О':<2}"
     lines.append(header)
     lines.append("─" * len(header))
     
@@ -383,8 +383,9 @@ def format_table(tournament_id: int, ordered: List[tuple]) -> str:
         
         if len(display_name) > 10:
             display_name = display_name[:9] + "."
-            
-        lines.append(f"{i:<2}{display_name:<10}{st['P']:<2}{st['W']:<2}{st['D']:<2}{st['L']:<2}{st['GD']:>3}{st['PTS']:<2}")
+        
+        # ИСПРАВЛЕНО: добавили правильные отступы между ± и О
+        lines.append(f"{i:<2}{display_name:<10}{st['P']:<2}{st['W']:<2}{st['D']:<2}{st['L']:<2}{st['GD']:>4}{st['PTS']:<2}")
     
     return "```\n" + "\n".join(lines) + "\n```"
 
@@ -629,6 +630,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     data = query.data
     chat_id = update.effective_chat.id
+    # ИСПРАВЛЕНО: проверяем права админа при каждом нажатии кнопки
     user_is_admin = await is_admin(update, context)
     
     if data == "main_menu":
@@ -685,8 +687,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Матч не найден.", reply_markup=get_main_menu_keyboard(user_is_admin))
             return
 
+        # ИСПРАВЛЕНО: добавляем проверку на уже записанный результат
+        if match['played']:
+            await query.edit_message_text(
+                f"❌ Результат этого матча уже записан: {match['home']} {match['home_goals']}:{match['away_goals']} {match['away']}",
+                reply_markup=get_main_menu_keyboard(user_is_admin)
+            )
+            return
+
         context.user_data['selected_match_id'] = match_id
-        context.user_data['selected_match'] = match
+        context.user_data['selected_match'] = dict(match)  # Сохраняем как обычный dict
         context.user_data['match_scores'] = {}
 
         no = match_no(match)
@@ -698,6 +708,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data.startswith("score_"):
         parts = data[6:].split("_", 3)
+        if len(parts) < 3:
+            await query.edit_message_text("❌ Ошибка формата данных.", reply_markup=get_main_menu_keyboard(user_is_admin))
+            return
+            
         match_id = int(parts[0])
         player_name = parts[1]
         goals = int(parts[2])
@@ -706,6 +720,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not match:
             await query.edit_message_text("❌ Ошибка: матч не выбран.", reply_markup=get_main_menu_keyboard(user_is_admin))
             return
+
+        # ИСПРАВЛЕНО: дополнительная проверка что матч еще не сыгран
+        t = get_active_tournament(chat_id)
+        if t:
+            current_match = get_match_by_id(t['id'], match_id)
+            if current_match and current_match['played']:
+                await query.edit_message_text(
+                    "❌ Этот матч уже сыгран! Результат не может быть изменен.",
+                    reply_markup=get_main_menu_keyboard(user_is_admin)
+                )
+                # Очищаем данные
+                context.user_data.pop('selected_match_id', None)
+                context.user_data.pop('selected_match', None)
+                context.user_data.pop('match_scores', None)
+                return
 
         context.user_data.setdefault('match_scores', {})
         context.user_data['match_scores'][player_name] = goals
@@ -724,36 +753,44 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             home_goals = context.user_data['match_scores'].get(match['home'], 0)
             away_goals = context.user_data['match_scores'].get(match['away'], 0)
 
-            t = get_active_tournament(chat_id)
             if t:
-                record_result(t['id'], match_id, home_goals, away_goals)
+                # ИСПРАВЛЕНО: еще одна проверка перед записью
+                current_match = get_match_by_id(t['id'], match_id)
+                if current_match and not current_match['played']:
+                    record_result(t['id'], match_id, home_goals, away_goals)
 
-                context.user_data.pop('selected_match_id', None)
-                context.user_data.pop('selected_match', None)
-                context.user_data.pop('match_scores', None)
+                    match_comment = get_funny_match_comment(home_goals, away_goals)
 
-                match_comment = get_funny_match_comment(home_goals, away_goals)
+                    ordered = get_standings(t['id'])
+                    prize = get_active_tournament_prize(t['id'])
+                    msg = format_table(t['id'], ordered)
+                    fun = get_funny_message(ordered, prize)
 
-                ordered = get_standings(t['id'])
-                prize = get_active_tournament_prize(t['id'])
-                msg = format_table(t['id'], ordered)
-                fun = get_funny_message(ordered, prize)
+                    result_text = (
+                        f"✅ Результат записан!\n"
+                        f"⚽ Матч #{no}: {match['home']} {home_goals}:{away_goals} {match['away']}\n\n"
+                        f"{match_comment}\n\n"
+                        f"{msg}"
+                    )
 
-                result_text = (
-                    f"✅ Результат записан!\n"
-                    f"⚽ Матч #{no}: {match['home']} {home_goals}:{away_goals} {match['away']}\n\n"
-                    f"{match_comment}\n\n"
-                    f"{msg}"
-                )
+                    await query.edit_message_text(
+                        result_text,
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=get_main_menu_keyboard(user_is_admin)
+                    )
 
-                await query.edit_message_text(
-                    result_text,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=get_main_menu_keyboard(user_is_admin)
-                )
-
-                if fun:
-                    await query.message.reply_text(fun)
+                    if fun:
+                        await query.message.reply_text(fun)
+                else:
+                    await query.edit_message_text(
+                        "❌ Матч уже сыгран или не найден.",
+                        reply_markup=get_main_menu_keyboard(user_is_admin)
+                    )
+            
+            # Очищаем данные в любом случае
+            context.user_data.pop('selected_match_id', None)
+            context.user_data.pop('selected_match', None)
+            context.user_data.pop('match_scores', None)
     
     elif data == "add_player":
         t = get_active_tournament(chat_id)
