@@ -993,17 +993,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_is_admin = await is_admin(update, context)
 
     if stage == 'tournament_name':
+        # Проверяем права только для создания турнира
+        if not user_is_admin:
+            context.user_data['stage'] = None
+            await update.message.reply_text(
+                "❌ Только администраторы группы могут создавать турниры.",
+                reply_markup=get_main_menu_keyboard(user_is_admin)
+            )
+            return
+            
         context.user_data['new_tournament'] = {'name': text}
         context.user_data['stage'] = 'tournament_rounds'
         await update.message.reply_text("Сколько кругов? (по умолчанию 2):")
     
     elif stage == 'tournament_rounds':
+        # Здесь уже не нужно проверять права, так как процесс уже начат
         rounds = int(text) if text.isdigit() else 2
         context.user_data['new_tournament']['rounds'] = rounds
         context.user_data['stage'] = 'tournament_prize'
         await update.message.reply_text("Какой приз?")
     
     elif stage == 'tournament_prize':
+        # И здесь тоже не нужно проверять права
         prize = text if text else "приз"
         context.user_data['new_tournament']['prize'] = prize
         
@@ -1026,6 +1037,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif stage == 'add_player_name':
         t = get_active_tournament(chat_id)
         if not t:
+            context.user_data['stage'] = None
             await update.message.reply_text(
                 "❌ Нет активного турнира.",
                 reply_markup=get_main_menu_keyboard(user_is_admin)
@@ -1043,13 +1055,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif stage == 'add_players_list':
         t = get_active_tournament(chat_id)
         if not t:
+            context.user_data['stage'] = None
             await update.message.reply_text(
                 "❌ Нет активного турнира.",
                 reply_markup=get_main_menu_keyboard(user_is_admin)
             )
             return
-        
-        # Разделяем имена по запятой и очищаем от пробелов
+
         player_names = [name.strip() for name in text.split(',') if name.strip()]
         
         if not player_names:
@@ -1060,10 +1072,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Добавляем всех игроков
         added_count = 0
         for name in player_names:
-            if len(name) > 0 and len(name) <= 50:  # Проверяем длину имени
+            if len(name) > 0 and len(name) <= 50: 
                 add_player(t['id'], name)
                 added_count += 1
         
