@@ -166,17 +166,19 @@ def init_db():
 
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     chat = update.effective_chat
-    user = update.effective_user
-
     if chat.type == 'private':
         return True
-
+    user = update.effective_user
     try:
         member = await context.bot.get_chat_member(chat.id, user.id)
         return member.status in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR)
     except Exception:
-        return False
-
+        try:
+            member = await context.bot.get_chat_member(chat.id, user.id)
+            return member.status in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR)
+        except Exception:
+            return False   
+        
 def get_active_tournament(chat_id: int) -> Optional[sqlite3.Row]:
     conn = db()
     c = conn.cursor()
@@ -362,29 +364,33 @@ def get_standings(tournament_id: int) -> List[tuple]:
     ordered = sorted(table.items(), key=lambda kv: (-kv[1]["PTS"], -kv[1]["GD"], -kv[1]["GF"], kv[0]))
     return ordered
 
-def format_table(tournament_id: int, ordered: List[tuple]) -> str:
-    lines = []
-    header = f"{'#':<2}{'Игрок':<10}{'И':<3}{'В':<3}{'Н':<3}{'П':<3}{'±':<5}{'О':<3}"
-    lines.append(header)
-    lines.append("─" * len(header))
-    for i, (name, st) in enumerate(ordered, start=1):
-        club = get_player_club(tournament_id, name)
-        short_club = get_short_club_name(club) if club else ""
-        if club:
-            display_name = f"{name[:6]}({short_club})" if len(name) > 6 else f"{name}({short_club})"
-        else:
-            display_name = name[:9]
-        if len(display_name) > 10:
-            display_name = display_name[:9] + "."
-        lines.append(f"{i:<2}{display_name:<10}{st['P']:<3}{st['W']:<3}{st['D']:<3}{st['L']:<3}{st['GD']:<4}{st['PTS']:<3}")
-    # ВАЖНО: возвращаем HTML <pre>, НИКАКИХ бэктиков
-    table = "\n".join(lines)
-    # Экранируем спецсимволы для HTML
-    table = (table
-             .replace("&", "&amp;")
+def _html_escape(s: str) -> str:
+    return (s.replace("&", "&amp;")
              .replace("<", "&lt;")
              .replace(">", "&gt;"))
-    return f"<pre>{table}</pre>"
+
+def format_table(tournament_id: int, ordered: List[tuple]) -> str:
+    # ширины колонок, все числа вправо
+    # #  Игрок         И  В  Н  П   ±   О
+    header = f"{'#':<2}{'Игрок':<12}{'И':>3}{'В':>3}{'Н':>3}{'П':>3}{'±':>5}{'О':>4}"
+    lines = [header, "─" * len(header)]
+
+    for i, (name, st) in enumerate(ordered, start=1):
+        club = get_player_club(tournament_id, name)
+        short = get_short_club_name(club) if club else ""
+        display = f"{name[:8]}({short})" if club else name[:12]
+        if len(display) > 12:
+            display = display[:11] + "…"
+
+        lines.append(
+            f"{i:<2}"
+            f"{display:<12}"
+            f"{st['P']:>3}{st['W']:>3}{st['D']:>3}{st['L']:>3}"
+            f"{st['GD']:>5}{st['PTS']:>4}"
+        )
+
+    table = "\n".join(lines)
+    return f"<pre>{_html_escape(table)}</pre>"
 
 def get_active_tournament_prize(tournament_id: int) -> str:
     conn = db()
@@ -621,13 +627,45 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_main_menu_keyboard(user_is_admin)
     )
 
+
+async def cmd_new_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ Только админы.")
+    args = " ".join(context.args)
+    parts = [p.strip() for p in args.split("|")]
+    if not parts or not parts[0]:
+        return await update.message.reply_text("Формат: /newtournament Название | [кругов] | [приз]")
+    name = parts[0]
+    rounds = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 2
+    prize = parts[2] if len(parts) > 2 else "приз"
+    tid = add_tournament(update.effective_chat.id, name, prize, rounds)
+    await update.message.reply_text(
+        f"✅ Турнир '{_html_escape(name)}' создан.\nКругов: {rounds}\nПриз: { _html_escape(prize)}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_main_menu_keyboard(True)
+    )
+
+async def cmd_end_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return await update.message.reply_text("❌ Только админы.")
+    t = get_active_tournament(update.effective_chat.id)
+    if not t:
+        return await update.message.reply_text("❌ Нет активного турнира.")
+    ordered = get_standings(t['id'])
+    end_tournament(t['id'])
+    winner = ordered[0][0] if ordered else "никто"
+    msg = format_table(t['id'], ordered)
+    await update.message.reply_html(
+        f"🏁 Турнир '{_html_escape(t['name'])}' завершён!\nПобедитель: {_html_escape(winner)}\n\n{msg}",
+        reply_markup=get_main_menu_keyboard(True)
+    )
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     data = query.data
     chat_id = update.effective_chat.id
-    # ИСПРАВЛЕНО: проверяем права админа при каждом нажатии кнопки
     user_is_admin = await is_admin(update, context)
     
     if data == "main_menu":
@@ -684,7 +722,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Матч не найден.", reply_markup=get_main_menu_keyboard(user_is_admin))
             return
 
-        # Проверяем только один раз при выборе матча
         if match['played']:
             await query.edit_message_text(
                 f"❌ Результат этого матча уже записан: {match['home']} {match['home_goals']}:{match['away_goals']} {match['away']}",
@@ -751,25 +788,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ordered = get_standings(t['id'])
             prize = get_active_tournament_prize(t['id'])
             msg = format_table(t['id'], ordered)
-            fun = get_funny_message(ordered, prize)
+
+            home = _html_escape(match['home'])
+            away = _html_escape(match['away'])
+            comment = _html_escape(match_comment)
 
             result_text = (
                 f"✅ Результат записан!\n"
-                f"⚽ Матч #{no}: {match['home']} {home_goals}:{away_goals} {match['away']}\n\n"
-                f"{match_comment}\n\n"
+                f"⚽ Матч #{no}: {home} {home_goals}:{away_goals} {away}\n\n"
+                f"{comment}\n\n"
                 f"{msg}"
             )
 
-            await query.edit_message_text(
-                result_text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+            try:
+                await query.edit_message_text(
+                    result_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_main_menu_keyboard(user_is_admin)
+                )
+            except Exception:
+                await query.message.reply_html(
+                    result_text,
+                    reply_markup=get_main_menu_keyboard(user_is_admin)
+                )
 
+            fun = get_funny_message(ordered, prize)
             if fun:
                 await query.message.reply_text(fun)
-            
-            # Очищаем данные
+
+            # Чистим состояние
             context.user_data.pop('selected_match_id', None)
             context.user_data.pop('selected_match', None)
             context.user_data.pop('match_scores', None)
@@ -997,7 +1044,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"🏆 Турнир '{t['name']}' окончен!\n"
             f"{winner_msg}\n\n{msg}",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
             reply_markup=get_main_menu_keyboard(user_is_admin)
         )
 
@@ -1155,6 +1202,10 @@ def main():
     # Команды
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_menu))
+
+    app.add_handler(CommandHandler("newtournament", cmd_new_tournament))
+    app.add_handler(CommandHandler("endtournament", cmd_end_tournament))
+
     app.add_handler(CommandHandler("result", cmd_result))
     
     # Обработчики кнопок и текста
