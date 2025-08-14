@@ -367,7 +367,7 @@ def format_table(tournament_id: int, ordered: List[tuple]) -> str:
     lines = []
     
     # Заголовок с правильными отступами - добавили пробел между ± и О
-    header = f"{'#':<2}{'Игрок':<10}{'И':<2}{'В':<2}{'Н':<2}{'П':<2}{'±':<4}{'О':<2}"
+    header = f"{'#':<2}{'Игрок':<10}{'И':<2}{'В':<2}{'Н':<2}{'П':<2}{'±':<3}{'О':<2}"
     lines.append(header)
     lines.append("─" * len(header))
     
@@ -385,7 +385,7 @@ def format_table(tournament_id: int, ordered: List[tuple]) -> str:
             display_name = display_name[:9] + "."
         
         # ИСПРАВЛЕНО: добавили правильные отступы между ± и О
-        lines.append(f"{i:<2}{display_name:<10}{st['P']:<2}{st['W']:<2}{st['D']:<2}{st['L']:<2}{st['GD']:>4}{st['PTS']:<2}")
+        lines.append(f"{i:<2}{display_name:<10}{st['P']:<2}{st['W']:<2}{st['D']:<2}{st['L']:<2}{st['GD']:<3}{st['PTS']:<2}")
     
     return "```\n" + "\n".join(lines) + "\n```"
 
