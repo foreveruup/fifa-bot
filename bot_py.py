@@ -367,7 +367,7 @@ def format_table(tournament_id: int, ordered: List[tuple]) -> str:
     lines = []
     
     # Заголовок с правильными отступами - добавили пробел между ± и О
-    header = f"{'#':<2}{'Игрок':<10}{'И':<2}{'В':<2}{'Н':<2}{'П':<2}{'±':<3}{'О':<2}"
+    header = f"{'#':<2}{'Игрок':<10}{'И':<3}{'В':<3}{'Н':<3}{'П':<3}{'±':<5}{'О':<3}"
     lines.append(header)
     lines.append("─" * len(header))
     
@@ -385,7 +385,7 @@ def format_table(tournament_id: int, ordered: List[tuple]) -> str:
             display_name = display_name[:9] + "."
         
         # ИСПРАВЛЕНО: добавили правильные отступы между ± и О
-        lines.append(f"{i:<2}{display_name:<10}{st['P']:<2}{st['W']:<2}{st['D']:<2}{st['L']:<2}{st['GD']:<3}{st['PTS']:<2}")
+        lines.append(f"{i:<2}{display_name:<10}{st['P']:<3}{st['W']:<3}{st['D']:<3}{st['L']:<3}{st['GD']:<4}{st['PTS']:<3}")
     
     return "```\n" + "\n".join(lines) + "\n```"
 
@@ -687,7 +687,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Матч не найден.", reply_markup=get_main_menu_keyboard(user_is_admin))
             return
 
-        # ИСПРАВЛЕНО: добавляем проверку на уже записанный результат
+        # Проверяем только один раз при выборе матча
         if match['played']:
             await query.edit_message_text(
                 f"❌ Результат этого матча уже записан: {match['home']} {match['home_goals']}:{match['away_goals']} {match['away']}",
@@ -721,20 +721,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Ошибка: матч не выбран.", reply_markup=get_main_menu_keyboard(user_is_admin))
             return
 
-        # ИСПРАВЛЕНО: дополнительная проверка что матч еще не сыгран
         t = get_active_tournament(chat_id)
-        if t:
-            current_match = get_match_by_id(t['id'], match_id)
-            if current_match and current_match['played']:
-                await query.edit_message_text(
-                    "❌ Этот матч уже сыгран! Результат не может быть изменен.",
-                    reply_markup=get_main_menu_keyboard(user_is_admin)
-                )
-                # Очищаем данные
-                context.user_data.pop('selected_match_id', None)
-                context.user_data.pop('selected_match', None)
-                context.user_data.pop('match_scores', None)
-                return
+        if not t:
+            await query.edit_message_text("❌ Нет активного турнира.", reply_markup=get_main_menu_keyboard(user_is_admin))
+            return
 
         context.user_data.setdefault('match_scores', {})
         context.user_data['match_scores'][player_name] = goals
@@ -742,6 +732,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         no = match_no(match)
 
         if len(context.user_data['match_scores']) == 1:
+            # Первый игрок - показываем форму для второго
             other_player = match['away'] if player_name == match['home'] else match['home']
             await query.edit_message_text(
                 f"⚽ Матч #{no}: {match['home']} vs {match['away']}\n"
@@ -750,44 +741,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=get_score_keyboard(match_id, other_player)
             )
         else:
+            # Второй игрок - записываем результат и показываем итог
             home_goals = context.user_data['match_scores'].get(match['home'], 0)
             away_goals = context.user_data['match_scores'].get(match['away'], 0)
 
-            if t:
-                # ИСПРАВЛЕНО: еще одна проверка перед записью
-                current_match = get_match_by_id(t['id'], match_id)
-                if current_match and not current_match['played']:
-                    record_result(t['id'], match_id, home_goals, away_goals)
+            # ИСПРАВЛЕНО: убрали повторную проверку played статуса
+            # Записываем результат сразу
+            record_result(t['id'], match_id, home_goals, away_goals)
 
-                    match_comment = get_funny_match_comment(home_goals, away_goals)
+            match_comment = get_funny_match_comment(home_goals, away_goals)
 
-                    ordered = get_standings(t['id'])
-                    prize = get_active_tournament_prize(t['id'])
-                    msg = format_table(t['id'], ordered)
-                    fun = get_funny_message(ordered, prize)
+            ordered = get_standings(t['id'])
+            prize = get_active_tournament_prize(t['id'])
+            msg = format_table(t['id'], ordered)
+            fun = get_funny_message(ordered, prize)
 
-                    result_text = (
-                        f"✅ Результат записан!\n"
-                        f"⚽ Матч #{no}: {match['home']} {home_goals}:{away_goals} {match['away']}\n\n"
-                        f"{match_comment}\n\n"
-                        f"{msg}"
-                    )
+            result_text = (
+                f"✅ Результат записан!\n"
+                f"⚽ Матч #{no}: {match['home']} {home_goals}:{away_goals} {match['away']}\n\n"
+                f"{match_comment}\n\n"
+                f"{msg}"
+            )
 
-                    await query.edit_message_text(
-                        result_text,
-                        parse_mode=ParseMode.MARKDOWN,
-                        reply_markup=get_main_menu_keyboard(user_is_admin)
-                    )
+            await query.edit_message_text(
+                result_text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=get_main_menu_keyboard(user_is_admin)
+            )
 
-                    if fun:
-                        await query.message.reply_text(fun)
-                else:
-                    await query.edit_message_text(
-                        "❌ Матч уже сыгран или не найден.",
-                        reply_markup=get_main_menu_keyboard(user_is_admin)
-                    )
+            if fun:
+                await query.message.reply_text(fun)
             
-            # Очищаем данные в любом случае
+            # Очищаем данные
             context.user_data.pop('selected_match_id', None)
             context.user_data.pop('selected_match', None)
             context.user_data.pop('match_scores', None)
