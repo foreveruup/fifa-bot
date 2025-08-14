@@ -363,31 +363,28 @@ def get_standings(tournament_id: int) -> List[tuple]:
     return ordered
 
 def format_table(tournament_id: int, ordered: List[tuple]) -> str:
-    """ИСПРАВЛЕННОЕ форматирование таблицы с правильными отступами"""
     lines = []
-    
-    # Заголовок с правильными отступами - добавили пробел между ± и О
     header = f"{'#':<2}{'Игрок':<10}{'И':<3}{'В':<3}{'Н':<3}{'П':<3}{'±':<5}{'О':<3}"
     lines.append(header)
     lines.append("─" * len(header))
-    
     for i, (name, st) in enumerate(ordered, start=1):
         club = get_player_club(tournament_id, name)
         short_club = get_short_club_name(club) if club else ""
-        
-        # Сокращаем имя игрока для мобильного отображения
         if club:
             display_name = f"{name[:6]}({short_club})" if len(name) > 6 else f"{name}({short_club})"
         else:
             display_name = name[:9]
-        
         if len(display_name) > 10:
             display_name = display_name[:9] + "."
-        
-        # ИСПРАВЛЕНО: добавили правильные отступы между ± и О
         lines.append(f"{i:<2}{display_name:<10}{st['P']:<3}{st['W']:<3}{st['D']:<3}{st['L']:<3}{st['GD']:<4}{st['PTS']:<3}")
-    
-    return "```\n" + "\n".join(lines) + "\n```"
+    # ВАЖНО: возвращаем HTML <pre>, НИКАКИХ бэктиков
+    table = "\n".join(lines)
+    # Экранируем спецсимволы для HTML
+    table = (table
+             .replace("&", "&amp;")
+             .replace("<", "&lt;")
+             .replace(">", "&gt;"))
+    return f"<pre>{table}</pre>"
 
 def get_active_tournament_prize(tournament_id: int) -> str:
     conn = db()
@@ -765,7 +762,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await query.edit_message_text(
                 result_text,
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.HTML,
                 reply_markup=get_main_menu_keyboard(user_is_admin)
             )
 
@@ -963,7 +960,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = format_table(t['id'], ordered)
         await query.edit_message_text(
             f"📊 ТУРНИРНАЯ ТАБЛИЦА:\n\n{msg}",
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
             reply_markup=get_main_menu_keyboard(user_is_admin)
         )
     
@@ -1137,7 +1134,7 @@ async def cmd_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             f"✅ Результат записан!\n{match_comment}\n\n{msg}",
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.HTML
         )
         if fun:
             await update.message.reply_text(fun)
