@@ -1205,7 +1205,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Обработчик текстовых сообщений
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'stage' not in context.user_data:
+    if 'stage' not in context.user_data or not context.user_data['stage']:
         return
 
     stage = context.user_data['stage']
@@ -1218,48 +1218,53 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['stage'] = None
             await send_new_menu(update, context, "❌ Только администраторы группы могут создавать турниры.")
             return
-            
+
         context.user_data['new_tournament'] = {'name': text}
         context.user_data['stage'] = 'tournament_rounds'
-    
+        await update.message.reply_text("Сколько кругов? Введите число (по умолчанию 2).")
+
     elif stage == 'tournament_rounds':
+        if text and not text.isdigit():
+            await update.message.reply_text("Пожалуйста, введите число кругов (например, 2).")
+            return
+
         rounds = int(text) if text.isdigit() else 2
         context.user_data['new_tournament']['rounds'] = rounds
         context.user_data['stage'] = 'tournament_prize'
-        await update.message.reply_text("Какой приз?")
-    
+        await update.message.reply_text("Какой приз? (можно текстом)")
+
     elif stage == 'tournament_prize':
         prize = text if text else "приз"
-        context.user_data['new_tournament']['prize'] = prize
-        
-        tid = add_tournament(
-            chat_id,
-            context.user_data['new_tournament']['name'],
-            prize,
-            context.user_data['new_tournament']['rounds']
-        )
+        nt = context.user_data.get('new_tournament', {})
+        name = nt.get('name', 'Турнир')
+        rounds = nt.get('rounds', 2)
+
+        tid = add_tournament(chat_id, name, prize, rounds)
+
+        # Очистим временные поля
         context.user_data['stage'] = None
-        
+        context.user_data.pop('new_tournament', None)
+
         await send_new_menu(
             update, context,
-            f"✅ Турнир '{context.user_data['new_tournament']['name']}' создан и выбран!\n"
-            f"🏆 Приз: {prize}\n"
-            f"🔄 Кругов: {context.user_data['new_tournament']['rounds']}\n\n"
-            "Теперь добавляйте игроков и назначайте им клубы:"
+            f"✅ Турнир '{_html_escape(name)}' создан и выбран!\n"
+            f"🏆 Приз: {_html_escape(prize)}\n"
+            f"🔄 Кругов: {rounds}\n\n"
+            "Теперь добавляйте игроков и назначайте им клубы:",
+            parse_mode=ParseMode.HTML
         )
-    
+
     elif stage == 'add_player_name':
         current_tournament = get_current_tournament(chat_id)
         if not current_tournament:
             context.user_data['stage'] = None
             await send_new_menu(update, context, "❌ Нет выбранного турнира.")
             return
-        
+
         add_player(current_tournament['id'], text)
         context.user_data['stage'] = None
-        
         await send_new_menu(update, context, f"✅ Игрок {text} добавлен в турнир!")
-    
+
     elif stage == 'add_players_list':
         current_tournament = get_current_tournament(chat_id)
         if not current_tournament:
@@ -1268,22 +1273,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         player_names = [name.strip() for name in text.split(',') if name.strip()]
-        
         if not player_names:
             await update.message.reply_text(
                 "❌ Не найдено имен игроков. Попробуйте еще раз.\n"
                 "Пример: Амир, Диас, Влад"
             )
             return
-        
+
         added_count = 0
         for name in player_names:
-            if len(name) > 0 and len(name) <= 50: 
+            if 0 < len(name) <= 50:
                 add_player(current_tournament['id'], name)
                 added_count += 1
-        
+
         context.user_data['stage'] = None
-        
         await send_new_menu(
             update, context,
             f"✅ Добавлено игроков: {added_count}\n"
