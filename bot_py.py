@@ -105,7 +105,11 @@ DRAW_COMMENTS = [
 
 TOURNAMENT_NAME, TOURNAMENT_ROUNDS, TOURNAMENT_PRIZE, ADD_PLAYER_NAME, ADD_PLAYERS_LIST = range(5)
 
-DB_PATH = os.getenv("LEAGUE_DB", "league_v3.db")
+# Путь к базе данных в постоянной директории
+DB_PATH = os.getenv("LEAGUE_DB", "/app/data/league_v3.db")
+
+# Создаем директорию для базы данных если её нет
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -115,7 +119,7 @@ def db():
 def init_db():
     conn = db()
     c = conn.cursor()
-    # Таблица турниров
+    # Таблица турниров - убираем поле active, теперь все турниры сохраняются
     c.execute("""
     CREATE TABLE IF NOT EXISTS tournaments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,8 +127,7 @@ def init_db():
         name TEXT NOT NULL,
         prize TEXT,
         rounds INTEGER DEFAULT 2,
-        created_at TEXT NOT NULL,
-        active INTEGER DEFAULT 1
+        created_at TEXT NOT NULL
     );
     """)
     c.execute("""
@@ -146,6 +149,15 @@ def init_db():
         home_goals INTEGER,
         away_goals INTEGER,
         played INTEGER DEFAULT 0,
+        FOREIGN KEY(tournament_id) REFERENCES tournaments(id)
+    );
+    """)
+    
+    # Добавляем таблицу для текущего выбранного турнира в чате
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS chat_current_tournament (
+        chat_id INTEGER PRIMARY KEY,
+        tournament_id INTEGER,
         FOREIGN KEY(tournament_id) REFERENCES tournaments(id)
     );
     """)
@@ -178,14 +190,43 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
             return member.status in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR)
         except Exception:
             return False   
-        
-def get_active_tournament(chat_id: int) -> Optional[sqlite3.Row]:
+
+def get_current_tournament(chat_id: int) -> Optional[sqlite3.Row]:
+    """Получает текущий выбранный турнир для чата"""
     conn = db()
     c = conn.cursor()
-    c.execute("SELECT * FROM tournaments WHERE chat_id=? AND active=1 ORDER BY id DESC LIMIT 1", (chat_id,))
+    c.execute("""
+        SELECT t.* FROM tournaments t
+        JOIN chat_current_tournament cct ON t.id = cct.tournament_id
+        WHERE cct.chat_id = ?
+    """, (chat_id,))
     row = c.fetchone()
     conn.close()
     return row
+
+def set_current_tournament(chat_id: int, tournament_id: int):
+    """Устанавливает текущий турнир для чата"""
+    conn = db()
+    c = conn.cursor()
+    c.execute("""
+        INSERT OR REPLACE INTO chat_current_tournament (chat_id, tournament_id)
+        VALUES (?, ?)
+    """, (chat_id, tournament_id))
+    conn.commit()
+    conn.close()
+
+def get_chat_tournaments(chat_id: int) -> List[sqlite3.Row]:
+    """Получает все турниры для чата"""
+    conn = db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT * FROM tournaments 
+        WHERE chat_id = ? 
+        ORDER BY created_at DESC
+    """, (chat_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
 
 def match_no(row: sqlite3.Row) -> int:
     try:
@@ -198,29 +239,19 @@ def add_tournament(chat_id: int, name: str, prize: str, rounds: int) -> int:
     conn = db()
     c = conn.cursor()
     
-    c.execute("UPDATE tournaments SET active=0 WHERE chat_id=?", (chat_id,))
-    
-    tournament_ids = c.execute("SELECT id FROM tournaments WHERE chat_id=?", (chat_id,)).fetchall()
-    for tid in tournament_ids:
-        c.execute("DELETE FROM matches WHERE tournament_id=?", (tid['id'],))
-        c.execute("DELETE FROM players WHERE tournament_id=?", (tid['id'],))
-    
-    
+    # Просто создаем новый турнир, не удаляя старые
     c.execute("""
-    INSERT INTO tournaments (chat_id, name, prize, rounds, created_at, active)
-    VALUES (?, ?, ?, ?, ?, 1)
+    INSERT INTO tournaments (chat_id, name, prize, rounds, created_at)
+    VALUES (?, ?, ?, ?, ?)
     """, (chat_id, name, prize, rounds, datetime.now().isoformat()))
     tid = c.lastrowid
+    
+    # Устанавливаем новый турнир как текущий
+    set_current_tournament(chat_id, tid)
+    
     conn.commit()
     conn.close()
     return tid
-
-def end_tournament(tournament_id: int):
-    conn = db()
-    c = conn.cursor()
-    c.execute("UPDATE tournaments SET active=0 WHERE id=?", (tournament_id,))
-    conn.commit()
-    conn.close()
 
 # -------------------------
 # Игроки и клубы
@@ -392,7 +423,7 @@ def format_table(tournament_id: int, ordered: List[tuple]) -> str:
     table = "\n".join(lines)
     return f"<pre>{_html_escape(table)}</pre>"
 
-def get_active_tournament_prize(tournament_id: int) -> str:
+def get_current_tournament_prize(tournament_id: int) -> str:
     conn = db()
     c = conn.cursor()
     c.execute("SELECT prize FROM tournaments WHERE id=?", (tournament_id,))
@@ -491,26 +522,47 @@ def get_funny_message(ordered: List[tuple], prize: str) -> Optional[str]:
     else:
         return random.choice(chaos_messages)
 
-def get_main_menu_keyboard(is_admin: bool = True):
-    """Клавиатура с учетом прав пользователя"""
+def get_main_menu_keyboard(is_admin: bool = True, has_tournament: bool = False):
+    """Клавиатура с учетом прав пользователя и наличия турнира"""
     keyboard = []
     
-    if is_admin:
-        keyboard.append([InlineKeyboardButton("🆕 Новый турнир", callback_data="new_tournament")])
-    
-    keyboard.extend([
-        [InlineKeyboardButton("👥 Добавить игрока", callback_data="add_player"),
-         InlineKeyboardButton("👥+ Добавить списком", callback_data="add_players_list")],
-        [InlineKeyboardButton("⚽ Назначить клубы", callback_data="assign_clubs_menu")],
-        [InlineKeyboardButton("📅 Генерировать расписание", callback_data="generate_schedule")],
-        [InlineKeyboardButton("📋 Расписание", callback_data="show_schedule"),
-         InlineKeyboardButton("⚽ Записать результат", callback_data="record_result")],
-        [InlineKeyboardButton("📊 Таблица", callback_data="show_table")]
-    ])
+    # Кнопки для работы с турнирами
+    keyboard.append([InlineKeyboardButton("🏆 Выбрать турнир", callback_data="select_tournament")])
     
     if is_admin:
-        keyboard.append([InlineKeyboardButton("🏆 Завершить турнир", callback_data="end_tournament")])
+        keyboard.append([InlineKeyboardButton("🆕 Создать турнир", callback_data="new_tournament")])
     
+    # Кнопки для работы с текущим турниром (показываем только если турнир выбран)
+    if has_tournament:
+        keyboard.extend([
+            [InlineKeyboardButton("👥 Добавить игрока", callback_data="add_player"),
+             InlineKeyboardButton("👥+ Добавить списком", callback_data="add_players_list")],
+            [InlineKeyboardButton("⚽ Назначить клубы", callback_data="assign_clubs_menu")],
+            [InlineKeyboardButton("📊 Таблица", callback_data="show_table"),
+             InlineKeyboardButton("📋 Расписание", callback_data="show_schedule")],
+            [InlineKeyboardButton("⚽ Записать результат", callback_data="record_result"),
+             InlineKeyboardButton("✏️ Изменить результат", callback_data="edit_result")]
+        ])
+        
+        if is_admin:
+            keyboard.append([InlineKeyboardButton("📅 Генерировать расписание", callback_data="generate_schedule")])
+    
+    return InlineKeyboardMarkup(keyboard)
+
+def get_tournaments_keyboard(tournaments: List[sqlite3.Row], current_tournament_id: int = None):
+    """Клавиатура для выбора турнира"""
+    keyboard = []
+    
+    if not tournaments:
+        keyboard.append([InlineKeyboardButton("❌ Нет турниров", callback_data="no_tournaments")])
+    else:
+        for tournament in tournaments:
+            # Показываем статус текущего турнира
+            status = "🟢" if tournament['id'] == current_tournament_id else "⚪"
+            text = f"{status} {tournament['name'][:20]}"
+            keyboard.append([InlineKeyboardButton(text, callback_data=f"choose_tournament_{tournament['id']}")])
+    
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="main_menu")])
     return InlineKeyboardMarkup(keyboard)
 
 def get_players_keyboard(tournament_id: int):
@@ -556,12 +608,14 @@ def get_clubs_keyboard(country: str, player_name: str):
     keyboard.append([InlineKeyboardButton("◀️ Назад к странам", callback_data="select_country")])
     return InlineKeyboardMarkup(keyboard)
 
-def get_matches_keyboard(tournament_id: int, unplayed_only: bool = True):
+def get_matches_keyboard(tournament_id: int, unplayed_only: bool = True, for_edit: bool = False):
     keyboard = []
     matches = get_schedule(tournament_id, 100)
 
     if unplayed_only:
         matches = [m for m in matches if not m['played']]
+    elif for_edit:
+        matches = [m for m in matches if m['played']]  # Для редактирования только сыгранные
 
     if not matches:
         return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]])
@@ -578,22 +632,25 @@ def get_matches_keyboard(tournament_id: int, unplayed_only: bool = True):
             away_short = match['away'][:7] if len(match['away']) > 7 else match['away']
             text_full = f"{status} #{no}: {home_short}-{away_short} [{hg}:{ag}]"
 
-        keyboard.append([InlineKeyboardButton(text_full, callback_data=f"select_match_{match['id']}")])
+        callback_prefix = "edit_match_" if for_edit else "select_match_"
+        keyboard.append([InlineKeyboardButton(text_full, callback_data=f"{callback_prefix}{match['id']}")])
 
     keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="main_menu")])
     return InlineKeyboardMarkup(keyboard)
 
-def get_score_keyboard(match_id: int, player_name: str):
+def get_score_keyboard(match_id: int, player_name: str, is_edit: bool = False):
     """Клавиатура для выбора количества голов"""
     keyboard = []
     
     for i in range(0, 21, 5): 
         row = []
         for j in range(i, min(i + 5, 11)):
-            row.append(InlineKeyboardButton(str(j), callback_data=f"score_{match_id}_{player_name}_{j}"))
+            callback_prefix = "edit_score_" if is_edit else "score_"
+            row.append(InlineKeyboardButton(str(j), callback_data=f"{callback_prefix}{match_id}_{player_name}_{j}"))
         keyboard.append(row)
     
-    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="record_result")])
+    back_callback = "edit_result" if is_edit else "record_result"
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data=back_callback)])
     return InlineKeyboardMarkup(keyboard)
 
 def get_country_flag(country: str) -> str:
@@ -611,22 +668,59 @@ def get_country_flag(country: str) -> str:
     }
     return flags.get(country, "⚽")
 
+async def send_new_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, **kwargs):
+    """Отправляет новое меню (удаляет старое сообщение и отправляет новое)"""
+    chat_id = update.effective_chat.id
+    user_is_admin = await is_admin(update, context)
+    current_tournament = get_current_tournament(chat_id)
+    
+    # Определяем клавиатуру по умолчанию
+    default_markup = get_main_menu_keyboard(user_is_admin, bool(current_tournament))
+    reply_markup = kwargs.get('reply_markup', default_markup)
+    parse_mode = kwargs.get('parse_mode', None)
+    
+    try:
+        # Удаляем старое сообщение если это callback query
+        if hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.message.delete()
+    except Exception:
+        pass
+    
+    # Отправляем новое сообщение
+    if hasattr(update, 'callback_query') and update.callback_query:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode
+        )
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_is_admin = await is_admin(update, context)
-    await update.message.reply_text(
-        "⚽ Добро пожаловать в Tournament Manager!\n\n"
-        "Управляйте турниром с помощью кнопок ниже:",
-        reply_markup=get_main_menu_keyboard(user_is_admin)
-    )
+    current_tournament = get_current_tournament(update.effective_chat.id)
+    
+    text = "⚽ Добро пожаловать в Tournament Manager!\n\n"
+    if current_tournament:
+        text += f"🏆 Текущий турнир: {current_tournament['name']}\n\n"
+    text += "Управляйте турниром с помощью кнопок ниже:"
+    
+    await send_new_menu(update, context, text)
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_is_admin = await is_admin(update, context)
-    await update.message.reply_text(
-        "⚽ Меню управления турниром:",
-        reply_markup=get_main_menu_keyboard(user_is_admin)
-    )
-
+    current_tournament = get_current_tournament(update.effective_chat.id)
+    
+    text = "⚽ Меню управления турниром:"
+    if current_tournament:
+        text += f"\n🏆 Текущий турнир: {current_tournament['name']}"
+    
+    await send_new_menu(update, context, text)
 
 async def cmd_new_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
@@ -639,25 +733,12 @@ async def cmd_new_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE)
     rounds = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 2
     prize = parts[2] if len(parts) > 2 else "приз"
     tid = add_tournament(update.effective_chat.id, name, prize, rounds)
-    await update.message.reply_text(
-        f"✅ Турнир '{_html_escape(name)}' создан.\nКругов: {rounds}\nПриз: { _html_escape(prize)}",
-        parse_mode=ParseMode.HTML,
-        reply_markup=get_main_menu_keyboard(True)
-    )
-
-async def cmd_end_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        return await update.message.reply_text("❌ Только админы.")
-    t = get_active_tournament(update.effective_chat.id)
-    if not t:
-        return await update.message.reply_text("❌ Нет активного турнира.")
-    ordered = get_standings(t['id'])
-    end_tournament(t['id'])
-    winner = ordered[0][0] if ordered else "никто"
-    msg = format_table(t['id'], ordered)
-    await update.message.reply_html(
-        f"🏁 Турнир '{_html_escape(t['name'])}' завершён!\nПобедитель: {_html_escape(winner)}\n\n{msg}",
-        reply_markup=get_main_menu_keyboard(True)
+    
+    await send_new_menu(
+        update, context,
+        f"✅ Турнир '{_html_escape(name)}' создан и выбран как текущий.\n"
+        f"Кругов: {rounds}\nПриз: {_html_escape(prize)}",
+        parse_mode=ParseMode.HTML
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -667,74 +748,199 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     chat_id = update.effective_chat.id
     user_is_admin = await is_admin(update, context)
+    current_tournament = get_current_tournament(chat_id)
     
     if data == "main_menu":
-        await query.edit_message_text(
-            "⚽ Меню управления турниром:",
-            reply_markup=get_main_menu_keyboard(user_is_admin)
+        text = "⚽ Меню управления турниром:"
+        if current_tournament:
+            text += f"\n🏆 Текущий турнир: {current_tournament['name']}"
+        await send_new_menu(update, context, text)
+    
+    elif data == "select_tournament":
+        tournaments = get_chat_tournaments(chat_id)
+        current_id = current_tournament['id'] if current_tournament else None
+        
+        await send_new_menu(
+            update, context,
+            "🏆 Выберите турнир:\n\n🟢 - текущий турнир\n⚪ - другие турниры",
+            reply_markup=get_tournaments_keyboard(tournaments, current_id)
         )
+    
+    elif data.startswith("choose_tournament_"):
+        tournament_id = int(data[18:])
+        set_current_tournament(chat_id, tournament_id)
+        
+        # Получаем информацию о выбранном турнире
+        conn = db()
+        c = conn.cursor()
+        c.execute("SELECT * FROM tournaments WHERE id=?", (tournament_id,))
+        tournament = c.fetchone()
+        conn.close()
+        
+        if tournament:
+            await send_new_menu(
+                update, context,
+                f"✅ Выбран турнир: {tournament['name']}\n\n⚽ Меню управления турниром:"
+            )
+        else:
+            await send_new_menu(update, context, "❌ Ошибка выбора турнира")
     
     elif data == "new_tournament":
         if not user_is_admin:
-            await query.edit_message_text(
-                "❌ Только администраторы группы могут создавать турниры.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+            await send_new_menu(update, context, "❌ Только администраторы группы могут создавать турниры.")
             return
         await query.edit_message_text("Введите название турнира:")
         context.user_data['stage'] = 'tournament_name'
     
     elif data == "add_players_list":
-        t = get_active_tournament(chat_id)
-        if not t:
-            await query.edit_message_text(
-                "❌ Нет активного турнира. Создайте новый турнир.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира. Выберите турнир.")
             return
         await query.edit_message_text("Введите имена игроков через запятую:\nПример: Амир, Диас, Влад")
         context.user_data['stage'] = 'add_players_list'
     
     elif data == "record_result":
-        t = get_active_tournament(chat_id)
-        if not t:
-            await query.edit_message_text(
-                "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
             return
         
-        await query.edit_message_text(
-            "⚽ Выберите матч для записи результата:\n\n"
-            "⚽ - не сыгран, ✅ - завершен",
-            reply_markup=get_matches_keyboard(t['id'], unplayed_only=True)
+        await send_new_menu(
+            update, context,
+            "⚽ Выберите матч для записи результата:\n\n⚽ - не сыгран, ✅ - завершен",
+            reply_markup=get_matches_keyboard(current_tournament['id'], unplayed_only=True)
         )
+    
+    elif data == "edit_result":
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+            return
+        
+        await send_new_menu(
+            update, context,
+            "✏️ Выберите матч для изменения результата:\n\n✅ - завершенные матчи",
+            reply_markup=get_matches_keyboard(current_tournament['id'], unplayed_only=False, for_edit=True)
+        )
+    
+    elif data.startswith("edit_match_"):
+        match_id = int(data[11:])
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+            return
+
+        match = get_match_by_id(current_tournament['id'], match_id)
+        if not match:
+            await send_new_menu(update, context, "❌ Матч не найден.")
+            return
+
+        context.user_data['edit_match_id'] = match_id
+        context.user_data['edit_match'] = dict(match)
+        context.user_data['edit_match_scores'] = {}
+
+        no = match_no(match)
+        await send_new_menu(
+            update, context,
+            f"✏️ Редактирование матча #{no}: {match['home']} vs {match['away']}\n"
+            f"Текущий счет: {match['home_goals']}:{match['away_goals']}\n\n"
+            f"Новое количество голов для {match['home']}?",
+            reply_markup=get_score_keyboard(match_id, match['home'], is_edit=True)
+        )
+    
+    elif data.startswith("edit_score_"):
+        parts = data[11:].split("_", 3)
+        if len(parts) < 3:
+            await send_new_menu(update, context, "❌ Ошибка формата данных.")
+            return
+            
+        match_id = int(parts[0])
+        player_name = parts[1]
+        goals = int(parts[2])
+
+        match = context.user_data.get('edit_match')
+        if not match:
+            await send_new_menu(update, context, "❌ Ошибка: матч не выбран.")
+            return
+
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+            return
+
+        context.user_data.setdefault('edit_match_scores', {})
+        context.user_data['edit_match_scores'][player_name] = goals
+
+        no = match_no(match)
+
+        if len(context.user_data['edit_match_scores']) == 1:
+            # Первый игрок - показываем форму для второго
+            other_player = match['away'] if player_name == match['home'] else match['home']
+            await send_new_menu(
+                update, context,
+                f"✏️ Редактирование матча #{no}: {match['home']} vs {match['away']}\n"
+                f"✅ {player_name}: {goals} голов\n\n"
+                f"Новое количество голов для {other_player}?",
+                reply_markup=get_score_keyboard(match_id, other_player, is_edit=True)
+            )
+        else:
+            # Второй игрок - записываем результат и показываем итог
+            home_goals = context.user_data['edit_match_scores'].get(match['home'], 0)
+            away_goals = context.user_data['edit_match_scores'].get(match['away'], 0)
+
+            # Записываем новый результат
+            record_result(current_tournament['id'], match_id, home_goals, away_goals)
+
+            match_comment = get_funny_match_comment(home_goals, away_goals)
+            ordered = get_standings(current_tournament['id'])
+            prize = get_current_tournament_prize(current_tournament['id'])
+            msg = format_table(current_tournament['id'], ordered)
+
+            home = _html_escape(match['home'])
+            away = _html_escape(match['away'])
+            comment = _html_escape(match_comment)
+            old_score = f"{match['home_goals']}:{match['away_goals']}"
+
+            result_text = (
+                f"✅ Результат изменен!\n"
+                f"⚽ Матч #{no}: {home} {home_goals}:{away_goals} {away}\n"
+                f"📝 Было: {old_score} → Стало: {home_goals}:{away_goals}\n\n"
+                f"{comment}\n\n"
+                f"{msg}"
+            )
+
+            await send_new_menu(update, context, result_text, parse_mode=ParseMode.HTML)
+
+            fun = get_funny_message(ordered, prize)
+            if fun:
+                await context.bot.send_message(chat_id=chat_id, text=fun)
+
+            # Чистим состояние
+            context.user_data.pop('edit_match_id', None)
+            context.user_data.pop('edit_match', None)
+            context.user_data.pop('edit_match_scores', None)
     
     elif data.startswith("select_match_"):
         match_id = int(data[13:])
-        t = get_active_tournament(chat_id)
-        if not t:
-            await query.edit_message_text("❌ Нет активного турнира.", reply_markup=get_main_menu_keyboard(user_is_admin))
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
             return
 
-        match = get_match_by_id(t['id'], match_id)
+        match = get_match_by_id(current_tournament['id'], match_id)
         if not match:
-            await query.edit_message_text("❌ Матч не найден.", reply_markup=get_main_menu_keyboard(user_is_admin))
+            await send_new_menu(update, context, "❌ Матч не найден.")
             return
 
         if match['played']:
-            await query.edit_message_text(
-                f"❌ Результат этого матча уже записан: {match['home']} {match['home_goals']}:{match['away_goals']} {match['away']}",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
+            await send_new_menu(
+                update, context,
+                f"❌ Результат этого матча уже записан: {match['home']} {match['home_goals']}:{match['away_goals']} {match['away']}"
             )
             return
 
         context.user_data['selected_match_id'] = match_id
-        context.user_data['selected_match'] = dict(match)  # Сохраняем как обычный dict
+        context.user_data['selected_match'] = dict(match)
         context.user_data['match_scores'] = {}
 
         no = match_no(match)
-        await query.edit_message_text(
+        await send_new_menu(
+            update, context,
             f"⚽ Матч #{no}: {match['home']} vs {match['away']}\n\n"
             f"Сколько голов забил {match['home']}?",
             reply_markup=get_score_keyboard(match_id, match['home'])
@@ -743,7 +949,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("score_"):
         parts = data[6:].split("_", 3)
         if len(parts) < 3:
-            await query.edit_message_text("❌ Ошибка формата данных.", reply_markup=get_main_menu_keyboard(user_is_admin))
+            await send_new_menu(update, context, "❌ Ошибка формата данных.")
             return
             
         match_id = int(parts[0])
@@ -752,12 +958,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         match = context.user_data.get('selected_match')
         if not match:
-            await query.edit_message_text("❌ Ошибка: матч не выбран.", reply_markup=get_main_menu_keyboard(user_is_admin))
+            await send_new_menu(update, context, "❌ Ошибка: матч не выбран.")
             return
 
-        t = get_active_tournament(chat_id)
-        if not t:
-            await query.edit_message_text("❌ Нет активного турнира.", reply_markup=get_main_menu_keyboard(user_is_admin))
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
             return
 
         context.user_data.setdefault('match_scores', {})
@@ -768,7 +973,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(context.user_data['match_scores']) == 1:
             # Первый игрок - показываем форму для второго
             other_player = match['away'] if player_name == match['home'] else match['home']
-            await query.edit_message_text(
+            await send_new_menu(
+                update, context,
                 f"⚽ Матч #{no}: {match['home']} vs {match['away']}\n"
                 f"✅ {player_name}: {goals} голов\n\n"
                 f"Сколько голов забил {other_player}?",
@@ -779,15 +985,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             home_goals = context.user_data['match_scores'].get(match['home'], 0)
             away_goals = context.user_data['match_scores'].get(match['away'], 0)
 
-            # ИСПРАВЛЕНО: убрали повторную проверку played статуса
-            # Записываем результат сразу
-            record_result(t['id'], match_id, home_goals, away_goals)
+            # Записываем результат
+            record_result(current_tournament['id'], match_id, home_goals, away_goals)
 
             match_comment = get_funny_match_comment(home_goals, away_goals)
-
-            ordered = get_standings(t['id'])
-            prize = get_active_tournament_prize(t['id'])
-            msg = format_table(t['id'], ordered)
+            ordered = get_standings(current_tournament['id'])
+            prize = get_current_tournament_prize(current_tournament['id'])
+            msg = format_table(current_tournament['id'], ordered)
 
             home = _html_escape(match['home'])
             away = _html_escape(match['away'])
@@ -800,21 +1004,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{msg}"
             )
 
-            try:
-                await query.edit_message_text(
-                    result_text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_main_menu_keyboard(user_is_admin)
-                )
-            except Exception:
-                await query.message.reply_html(
-                    result_text,
-                    reply_markup=get_main_menu_keyboard(user_is_admin)
-                )
+            await send_new_menu(update, context, result_text, parse_mode=ParseMode.HTML)
 
             fun = get_funny_message(ordered, prize)
             if fun:
-                await query.message.reply_text(fun)
+                await context.bot.send_message(chat_id=chat_id, text=fun)
 
             # Чистим состояние
             context.user_data.pop('selected_match_id', None)
@@ -822,54 +1016,42 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop('match_scores', None)
     
     elif data == "add_player":
-        t = get_active_tournament(chat_id)
-        if not t:
-            await query.edit_message_text(
-                "❌ Нет активного турнира. Создайте новый турнир.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира. Выберите турнир.")
             return
         await query.edit_message_text("Введите имя игрока:")
         context.user_data['stage'] = 'add_player_name'
     
     elif data == "assign_clubs_menu":
-        t = get_active_tournament(chat_id)
-        if not t:
-            await query.edit_message_text(
-                "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
             return
         
-        players_without_clubs = get_players_without_clubs(t['id'])
+        players_without_clubs = get_players_without_clubs(current_tournament['id'])
         if not players_without_clubs:
-            await query.edit_message_text(
-                "✅ Всем игрокам уже назначены клубы!",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+            await send_new_menu(update, context, "✅ Всем игрокам уже назначены клубы!")
             return
         
-        await query.edit_message_text(
+        await send_new_menu(
+            update, context,
             f"⚽ Назначение клубов игрокам\n\n"
             f"👥 Игроков без клубов: {len(players_without_clubs)}\n\n"
             "Выберите игрока:",
-            reply_markup=get_players_keyboard(t['id'])
+            reply_markup=get_players_keyboard(current_tournament['id'])
         )
     
     elif data.startswith("select_player_"):
-        player_id = int(data[14:])  # убираем "select_player_"
+        player_id = int(data[14:])
         player = get_player_by_id(player_id)
         if not player:
-            await query.edit_message_text(
-                "❌ Игрок не найден.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+            await send_new_menu(update, context, "❌ Игрок не найден.")
             return
         
         context.user_data['selected_player_id'] = player_id
         context.user_data['selected_player_name'] = player['name']
         
-        await query.edit_message_text(
+        await send_new_menu(
+            update, context,
             f"👤 Выбран игрок: {player['name']}\n\n"
             "🌍 Выберите страну для назначения клуба:",
             reply_markup=get_countries_keyboard()
@@ -878,7 +1060,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "select_country":
         # Возвращаемся к выбору стран для текущего игрока
         player_name = context.user_data.get('selected_player_name', 'игрок')
-        await query.edit_message_text(
+        await send_new_menu(
+            update, context,
             f"👤 Выбран игрок: {player_name}\n\n"
             "🌍 Выберите страну для назначения клуба:",
             reply_markup=get_countries_keyboard()
@@ -889,7 +1072,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         player_name = context.user_data.get('selected_player_name', 'игрок')
         context.user_data['selected_country'] = country
         
-        await query.edit_message_text(
+        await send_new_menu(
+            update, context,
             f"👤 Игрок: {player_name}\n"
             f"🌍 Страна: {get_country_flag(country)} {country}\n\n"
             f"⚽ Выберите клуб:",
@@ -905,22 +1089,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         player_name = context.user_data.get('selected_player_name')
         
         if not player_id or not player_name:
-            await query.edit_message_text(
-                "❌ Ошибка: игрок не выбран.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+            await send_new_menu(update, context, "❌ Ошибка: игрок не выбран.")
             return
         
-        t = get_active_tournament(chat_id)
-        if not t:
-            await query.edit_message_text(
-                "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
             return
         
         # Назначаем клуб выбранному игроку
-        assign_club(t['id'], player_name, club)
+        assign_club(current_tournament['id'], player_name, club)
         
         # Очищаем данные о выбранном игроке
         context.user_data.pop('selected_player_id', None)
@@ -928,57 +1105,75 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('selected_country', None)
         
         # Проверяем, остались ли игроки без клубов
-        remaining_players = get_players_without_clubs(t['id'])
+        remaining_players = get_players_without_clubs(current_tournament['id'])
         if remaining_players:
-            await query.edit_message_text(
+            await send_new_menu(
+                update, context,
                 f"✅ {player_name} назначен клуб {get_country_flag(country)} {club}!\n\n"
                 f"👥 Игроков без клубов осталось: {len(remaining_players)}\n\n"
                 "Выберите следующего игрока:",
-                reply_markup=get_players_keyboard(t['id'])
+                reply_markup=get_players_keyboard(current_tournament['id'])
             )
         else:
-            await query.edit_message_text(
+            await send_new_menu(
+                update, context,
                 f"✅ {player_name} назначен клуб {get_country_flag(country)} {club}!\n\n"
-                "🎉 Всем игрокам назначены клубы! Можете генерировать расписание.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
+                "🎉 Всем игрокам назначены клубы! Можете генерировать расписание."
             )
     
     elif data == "assign_random":
-        t = get_active_tournament(chat_id)
-        if not t:
-            await query.edit_message_text(
-                "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
             return
-        assign_random_clubs(t['id'])
-        await query.edit_message_text(
-            "🎲 Клубы назначены случайно!",
-            reply_markup=get_main_menu_keyboard(user_is_admin)
-        )
+        assign_random_clubs(current_tournament['id'])
+        await send_new_menu(update, context, "🎲 Клубы назначены случайно!")
     
     elif data == "generate_schedule":
-        t = get_active_tournament(chat_id)
-        if not t:
-            await query.edit_message_text(
-                "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+        if not user_is_admin:
+            await send_new_menu(update, context, "❌ Только администраторы могут генерировать расписание.")
             return
-        generate_schedule(t['id'], t['rounds'])
-        await query.edit_message_text(
-            "📅 Расписание сгенерировано!",
-            reply_markup=get_main_menu_keyboard(user_is_admin)
-        )
+            
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+            return
+        
+        # Проверяем есть ли уже матчи
+        existing_matches = get_schedule(current_tournament['id'])
+        if existing_matches:
+            await send_new_menu(
+                update, context,
+                "⚠️ В турнире уже есть матчи!\n\n"
+                "🚨 Генерация нового расписания удалит все текущие результаты!\n\n"
+                "Вы уверены?",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Да, сгенерировать", callback_data="confirm_generate_schedule")],
+                    [InlineKeyboardButton("❌ Отмена", callback_data="main_menu")]
+                ])
+            )
+        else:
+            generate_schedule(current_tournament['id'], current_tournament['rounds'])
+            await send_new_menu(update, context, "📅 Расписание сгенерировано!")
+    
+    elif data == "confirm_generate_schedule":
+        if not user_is_admin:
+            await send_new_menu(update, context, "❌ Только администраторы могут генерировать расписание.")
+            return
+            
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+            return
+            
+        generate_schedule(current_tournament['id'], current_tournament['rounds'])
+        await send_new_menu(update, context, "📅 Расписание сгенерировано! Все предыдущие результаты удалены.")
     
     elif data == "show_schedule":
-        t = get_active_tournament(chat_id)
-        if not t:
-            await query.edit_message_text("❌ Нет активного турнира.", reply_markup=get_main_menu_keyboard(user_is_admin))
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
             return
-        sched = get_schedule(t['id'])
+            
+        sched = get_schedule(current_tournament['id'])
         if not sched:
-            await query.edit_message_text("📋 Нет матчей. Сгенерируйте расписание.", reply_markup=get_main_menu_keyboard(user_is_admin))
+            await send_new_menu(update, context, "📋 Нет матчей. Сгенерируйте расписание.")
             return
 
         lines = ["📅 РАСПИСАНИЕ МАТЧЕЙ:\n"]
@@ -993,59 +1188,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             lines.append(f"{status} #{no}: {home_short} vs {away_short} [{hg}:{ag}]")
 
-        await query.edit_message_text("\n".join(lines), reply_markup=get_main_menu_keyboard(user_is_admin))
+        await send_new_menu(update, context, "\n".join(lines))
     
     elif data == "show_table":
-        t = get_active_tournament(chat_id)
-        if not t:
-            await query.edit_message_text(
-                "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
-            return
-        ordered = get_standings(t['id'])
-        msg = format_table(t['id'], ordered)
-        await query.edit_message_text(
-            f"📊 ТУРНИРНАЯ ТАБЛИЦА:\n\n{msg}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_main_menu_keyboard(user_is_admin)
-        )
-    
-    elif data == "end_tournament":
-        if not user_is_admin:
-            await query.edit_message_text(
-                "❌ Только администраторы группы могут завершать турниры.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+        if not current_tournament:
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
             return
             
-        t = get_active_tournament(chat_id)
-        if not t:
-            await query.edit_message_text(
-                "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
-            return
-        ordered = get_standings(t['id'])
-        end_tournament(t['id'])
-        winner = ordered[0][0] if ordered else "никто"
-        prize = get_active_tournament_prize(t['id'])
-        msg = format_table(t['id'], ordered)
-        
-        winner_messages = [
-            f"🎊 Барабанная дробь... Победитель — {winner}!",
-            f"👑 {winner} — новый король турнира!",
-            f"🏆 {winner} забирает {prize} домой!",
-            f"⚡ {winner} — гений футбола!"
-        ]
-        
-        winner_msg = random.choice(winner_messages)
-        
-        await query.edit_message_text(
-            f"🏆 Турнир '{t['name']}' окончен!\n"
-            f"{winner_msg}\n\n{msg}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_main_menu_keyboard(user_is_admin)
+        ordered = get_standings(current_tournament['id'])
+        msg = format_table(current_tournament['id'], ordered)
+        await send_new_menu(
+            update, context,
+            f"📊 ТУРНИРНАЯ ТАБЛИЦА:\n\n{msg}",
+            parse_mode=ParseMode.HTML
         )
 
 # Обработчик текстовых сообщений
@@ -1059,28 +1214,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_is_admin = await is_admin(update, context)
 
     if stage == 'tournament_name':
-        # Проверяем права только для создания турнира
         if not user_is_admin:
             context.user_data['stage'] = None
-            await update.message.reply_text(
-                "❌ Только администраторы группы могут создавать турниры.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+            await send_new_menu(update, context, "❌ Только администраторы группы могут создавать турниры.")
             return
             
         context.user_data['new_tournament'] = {'name': text}
         context.user_data['stage'] = 'tournament_rounds'
-        await update.message.reply_text("Сколько кругов? (по умолчанию 2):")
     
     elif stage == 'tournament_rounds':
-        # Здесь уже не нужно проверять права, так как процесс уже начат
         rounds = int(text) if text.isdigit() else 2
         context.user_data['new_tournament']['rounds'] = rounds
         context.user_data['stage'] = 'tournament_prize'
         await update.message.reply_text("Какой приз?")
     
     elif stage == 'tournament_prize':
-        # И здесь тоже не нужно проверять права
         prize = text if text else "приз"
         context.user_data['new_tournament']['prize'] = prize
         
@@ -1092,40 +1240,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data['stage'] = None
         
-        await update.message.reply_text(
-            f"✅ Турнир '{context.user_data['new_tournament']['name']}' создан!\n"
+        await send_new_menu(
+            update, context,
+            f"✅ Турнир '{context.user_data['new_tournament']['name']}' создан и выбран!\n"
             f"🏆 Приз: {prize}\n"
             f"🔄 Кругов: {context.user_data['new_tournament']['rounds']}\n\n"
-            "Теперь добавляйте игроков и назначайте им клубы:",
-            reply_markup=get_main_menu_keyboard(user_is_admin)
+            "Теперь добавляйте игроков и назначайте им клубы:"
         )
     
     elif stage == 'add_player_name':
-        t = get_active_tournament(chat_id)
-        if not t:
+        current_tournament = get_current_tournament(chat_id)
+        if not current_tournament:
             context.user_data['stage'] = None
-            await update.message.reply_text(
-                "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
             return
         
-        add_player(t['id'], text)
+        add_player(current_tournament['id'], text)
         context.user_data['stage'] = None
         
-        await update.message.reply_text(
-            f"✅ Игрок {text} добавлен в турнир!",
-            reply_markup=get_main_menu_keyboard(user_is_admin)
-        )
+        await send_new_menu(update, context, f"✅ Игрок {text} добавлен в турнир!")
     
     elif stage == 'add_players_list':
-        t = get_active_tournament(chat_id)
-        if not t:
+        current_tournament = get_current_tournament(chat_id)
+        if not current_tournament:
             context.user_data['stage'] = None
-            await update.message.reply_text(
-                "❌ Нет активного турнира.",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
-            )
+            await send_new_menu(update, context, "❌ Нет выбранного турнира.")
             return
 
         player_names = [name.strip() for name in text.split(',') if name.strip()]
@@ -1133,30 +1272,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not player_names:
             await update.message.reply_text(
                 "❌ Не найдено имен игроков. Попробуйте еще раз.\n"
-                "Пример: Амир, Диас, Влад",
-                reply_markup=get_main_menu_keyboard(user_is_admin)
+                "Пример: Амир, Диас, Влад"
             )
             return
         
         added_count = 0
         for name in player_names:
             if len(name) > 0 and len(name) <= 50: 
-                add_player(t['id'], name)
+                add_player(current_tournament['id'], name)
                 added_count += 1
         
         context.user_data['stage'] = None
         
-        await update.message.reply_text(
+        await send_new_menu(
+            update, context,
             f"✅ Добавлено игроков: {added_count}\n"
-            f"👥 Список: {', '.join(player_names[:10])}{'...' if len(player_names) > 10 else ''}",
-            reply_markup=get_main_menu_keyboard(user_is_admin)
+            f"👥 Список: {', '.join(player_names[:10])}{'...' if len(player_names) > 10 else ''}"
         )
 
 # Команда для записи результата (остается текстовой для удобства)
 async def cmd_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    t = get_active_tournament(update.effective_chat.id)
-    if not t:
-        await update.message.reply_text("❌ Нет активного турнира.")
+    current_tournament = get_current_tournament(update.effective_chat.id)
+    if not current_tournament:
+        await update.message.reply_text("❌ Нет выбранного турнира.")
         return
     if len(context.args) != 2:
         await update.message.reply_text("📝 Формат: /result ID X-Y\nПример: /result 1 2-1")
@@ -1169,14 +1307,14 @@ async def cmd_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Неверный формат счёта. Используйте X-Y")
             return
         hg, ag = int(score[0]), int(score[1])
-        record_result(t['id'], match_id, hg, ag)
+        record_result(current_tournament['id'], match_id, hg, ag)
         
         # Добавляем смешной комментарий
         match_comment = get_funny_match_comment(hg, ag)
         
-        ordered = get_standings(t['id'])
-        prize = get_active_tournament_prize(t['id'])
-        msg = format_table(t['id'], ordered)
+        ordered = get_standings(current_tournament['id'])
+        prize = get_current_tournament_prize(current_tournament['id'])
+        msg = format_table(current_tournament['id'], ordered)
         fun = get_funny_message(ordered, prize)
         
         await update.message.reply_text(
@@ -1202,10 +1340,7 @@ def main():
     # Команды
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_menu))
-
     app.add_handler(CommandHandler("newtournament", cmd_new_tournament))
-    app.add_handler(CommandHandler("endtournament", cmd_end_tournament))
-
     app.add_handler(CommandHandler("result", cmd_result))
     
     # Обработчики кнопок и текста
