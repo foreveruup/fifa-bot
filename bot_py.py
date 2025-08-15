@@ -570,6 +570,7 @@ def get_main_menu_keyboard(is_admin: bool = True, has_tournament: bool = False):
         
         if is_admin:
             keyboard.append([InlineKeyboardButton("📅 Генерировать расписание", callback_data="generate_schedule")])
+            keyboard.append([InlineKeyboardButton("🏁 Завершить турнир", callback_data="finish_tournament")])
     
     return InlineKeyboardMarkup(keyboard)
 
@@ -862,8 +863,483 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Введите название турнира:")
             context.user_data['stage'] = 'tournament_name'
         
-        # Здесь продолжаются остальные обработчики...
-        # [Остальной код обработки кнопок остается таким же]
+        elif data == "add_players_list":
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира. Выберите турнир.")
+                return
+            await query.edit_message_text("Введите имена игроков через запятую:\nПример: Амир, Диас, Влад")
+            context.user_data['stage'] = 'add_players_list'
+        
+        elif data == "add_player":
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира. Выберите турнир.")
+                return
+            await query.edit_message_text("Введите имя игрока:")
+            context.user_data['stage'] = 'add_player_name'
+        
+        elif data == "assign_clubs_menu":
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+            
+            players_without_clubs = get_players_without_clubs(current_tournament['id'])
+            if not players_without_clubs:
+                await send_new_menu(update, context, "✅ Всем игрокам уже назначены клубы!")
+                return
+            
+            await send_new_menu(
+                update, context,
+                f"⚽ Назначение клубов игрокам\n\n"
+                f"👥 Игроков без клубов: {len(players_without_clubs)}\n\n"
+                "Выберите игрока:",
+                reply_markup=get_players_keyboard(current_tournament['id'])
+            )
+        
+        elif data.startswith("select_player_"):
+            player_id = int(data[14:])
+            player = get_player_by_id(player_id)
+            if not player:
+                await send_new_menu(update, context, "❌ Игрок не найден.")
+                return
+            
+            context.user_data['selected_player_id'] = player_id
+            context.user_data['selected_player_name'] = player['name']
+            
+            await send_new_menu(
+                update, context,
+                f"👤 Выбран игрок: {player['name']}\n\n"
+                "🌍 Выберите страну для назначения клуба:",
+                reply_markup=get_countries_keyboard()
+            )
+        
+        elif data == "select_country":
+            # Возвращаемся к выбору стран для текущего игрока
+            player_name = context.user_data.get('selected_player_name', 'игрок')
+            await send_new_menu(
+                update, context,
+                f"👤 Выбран игрок: {player_name}\n\n"
+                "🌍 Выберите страну для назначения клуба:",
+                reply_markup=get_countries_keyboard()
+            )
+        
+        elif data.startswith("country_"):
+            country = data[8:]  
+            player_name = context.user_data.get('selected_player_name', 'игрок')
+            context.user_data['selected_country'] = country
+            
+            await send_new_menu(
+                update, context,
+                f"👤 Игрок: {player_name}\n"
+                f"🌍 Страна: {get_country_flag(country)} {country}\n\n"
+                f"⚽ Выберите клуб:",
+                reply_markup=get_clubs_keyboard(country, player_name)
+            )
+        
+        elif data.startswith("assign_club_"):
+            parts = data[12:].split("_", 1)  
+            country = parts[0]
+            club = parts[1]
+            
+            player_id = context.user_data.get('selected_player_id')
+            player_name = context.user_data.get('selected_player_name')
+            
+            if not player_id or not player_name:
+                await send_new_menu(update, context, "❌ Ошибка: игрок не выбран.")
+                return
+            
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+            
+            # Назначаем клуб выбранному игроку
+            assign_club(current_tournament['id'], player_name, club)
+            
+            # Очищаем данные о выбранном игроке
+            context.user_data.pop('selected_player_id', None)
+            context.user_data.pop('selected_player_name', None)
+            context.user_data.pop('selected_country', None)
+            
+            # Проверяем, остались ли игроки без клубов
+            remaining_players = get_players_without_clubs(current_tournament['id'])
+            if remaining_players:
+                await send_new_menu(
+                    update, context,
+                    f"✅ {player_name} назначен клуб {get_country_flag(country)} {club}!\n\n"
+                    f"👥 Игроков без клубов осталось: {len(remaining_players)}\n\n"
+                    "Выберите следующего игрока:",
+                    reply_markup=get_players_keyboard(current_tournament['id'])
+                )
+            else:
+                await send_new_menu(
+                    update, context,
+                    f"✅ {player_name} назначен клуб {get_country_flag(country)} {club}!\n\n"
+                    "🎉 Всем игрокам назначены клубы! Можете генерировать расписание."
+                )
+        
+        elif data == "assign_random":
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+            assign_random_clubs(current_tournament['id'])
+            await send_new_menu(update, context, "🎲 Клубы назначены случайно!")
+        
+        elif data == "generate_schedule":
+            if not user_is_admin:
+                await send_new_menu(update, context, "❌ Только администраторы могут генерировать расписание.")
+                return
+                
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+            
+            # Проверяем есть ли уже матчи
+            existing_matches = get_schedule(current_tournament['id'])
+            if existing_matches:
+                await send_new_menu(
+                    update, context,
+                    "⚠️ В турнире уже есть матчи!\n\n"
+                    "🚨 Генерация нового расписания удалит все текущие результаты!\n\n"
+                    "Вы уверены?",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ Да, сгенерировать", callback_data="confirm_generate_schedule")],
+                        [InlineKeyboardButton("❌ Отмена", callback_data="main_menu")]
+                    ])
+                )
+            else:
+                generate_schedule(current_tournament['id'], current_tournament['rounds'])
+                await send_new_menu(update, context, "📅 Расписание сгенерировано!")
+        
+        elif data == "confirm_generate_schedule":
+            if not user_is_admin:
+                await send_new_menu(update, context, "❌ Только администраторы могут генерировать расписание.")
+                return
+                
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+                
+            generate_schedule(current_tournament['id'], current_tournament['rounds'])
+            await send_new_menu(update, context, "📅 Расписание сгенерировано! Все предыдущие результаты удалены.")
+        
+        elif data == "show_schedule":
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+                
+            sched = get_schedule(current_tournament['id'])
+            if not sched:
+                await send_new_menu(update, context, "📋 Нет матчей. Сгенерируйте расписание.")
+                return
+
+            lines = ["📅 РАСПИСАНИЕ МАТЧЕЙ:\n"]
+            for m in sched:
+                status = "✅" if m['played'] else "⏳"
+                hg = m['home_goals'] if m['home_goals'] is not None else "-"
+                ag = m['away_goals'] if m['away_goals'] is not None else "-"
+                no = match_no(m)
+
+                home_short = m['home'][:8] if len(m['home']) > 8 else m['home']
+                away_short = m['away'][:8] if len(m['away']) > 8 else m['away']
+
+                lines.append(f"{status} #{no}: {home_short} vs {away_short} [{hg}:{ag}]")
+
+            await send_new_menu(update, context, "\n".join(lines))
+        
+        elif data == "show_table":
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+                
+            ordered = get_standings(current_tournament['id'])
+            msg = format_table(current_tournament['id'], ordered)
+            await send_new_menu(
+                update, context,
+                f"📊 ТУРНИРНАЯ ТАБЛИЦА:\n\n{msg}",
+                parse_mode=ParseMode.HTML
+            )
+        
+        elif data == "record_result":
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+            
+            await send_new_menu(
+                update, context,
+                "⚽ Выберите матч для записи результата:\n\n⚽ - не сыгран, ✅ - завершен",
+                reply_markup=get_matches_keyboard(current_tournament['id'], unplayed_only=True)
+            )
+        
+        elif data == "edit_result":
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+            
+            await send_new_menu(
+                update, context,
+                "✏️ Выберите матч для изменения результата:\n\n✅ - завершенные матчи",
+                reply_markup=get_matches_keyboard(current_tournament['id'], unplayed_only=False, for_edit=True)
+            )
+        
+        elif data.startswith("select_match_"):
+            match_id = int(data[13:])
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+
+            match = get_match_by_id(current_tournament['id'], match_id)
+            if not match:
+                await send_new_menu(update, context, "❌ Матч не найден.")
+                return
+
+            if match['played']:
+                await send_new_menu(
+                    update, context,
+                    f"❌ Результат этого матча уже записан: {match['home']} {match['home_goals']}:{match['away_goals']} {match['away']}"
+                )
+                return
+
+            context.user_data['selected_match_id'] = match_id
+            context.user_data['selected_match'] = dict(match)
+            context.user_data['match_scores'] = {}
+
+            no = match_no(match)
+            await send_new_menu(
+                update, context,
+                f"⚽ Матч #{no}: {match['home']} vs {match['away']}\n\n"
+                f"Сколько голов забил {match['home']}?",
+                reply_markup=get_score_keyboard(match_id, match['home'])
+            )
+        
+        elif data.startswith("score_"):
+            parts = data[6:].split("_", 3)
+            if len(parts) < 3:
+                await send_new_menu(update, context, "❌ Ошибка формата данных.")
+                return
+                
+            match_id = int(parts[0])
+            player_name = parts[1]
+            goals = int(parts[2])
+
+            match = context.user_data.get('selected_match')
+            if not match:
+                await send_new_menu(update, context, "❌ Ошибка: матч не выбран.")
+                return
+
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+
+            context.user_data.setdefault('match_scores', {})
+            context.user_data['match_scores'][player_name] = goals
+
+            no = match_no(match)
+
+            if len(context.user_data['match_scores']) == 1:
+                # Первый игрок - показываем форму для второго
+                other_player = match['away'] if player_name == match['home'] else match['home']
+                await send_new_menu(
+                    update, context,
+                    f"⚽ Матч #{no}: {match['home']} vs {match['away']}\n"
+                    f"✅ {player_name}: {goals} голов\n\n"
+                    f"Сколько голов забил {other_player}?",
+                    reply_markup=get_score_keyboard(match_id, other_player)
+                )
+            else:
+                # Второй игрок - записываем результат и показываем итог
+                home_goals = context.user_data['match_scores'].get(match['home'], 0)
+                away_goals = context.user_data['match_scores'].get(match['away'], 0)
+
+                # Записываем результат
+                record_result(current_tournament['id'], match_id, home_goals, away_goals)
+
+                match_comment = get_funny_match_comment(home_goals, away_goals)
+                ordered = get_standings(current_tournament['id'])
+                prize = get_current_tournament_prize(current_tournament['id'])
+                msg = format_table(current_tournament['id'], ordered)
+
+                home = _html_escape(match['home'])
+                away = _html_escape(match['away'])
+                comment = _html_escape(match_comment)
+
+                result_text = (
+                    f"✅ Результат записан!\n"
+                    f"⚽ Матч #{no}: {home} {home_goals}:{away_goals} {away}\n\n"
+                    f"{comment}\n\n"
+                    f"{msg}"
+                )
+
+                await send_new_menu(update, context, result_text, parse_mode=ParseMode.HTML)
+
+                fun = get_funny_message(ordered, prize)
+                if fun:
+                    await context.bot.send_message(chat_id=chat_id, text=fun)
+
+                # Чистим состояние
+                context.user_data.pop('selected_match_id', None)
+                context.user_data.pop('selected_match', None)
+                context.user_data.pop('match_scores', None)
+        
+        elif data == "finish_tournament":
+            if not user_is_admin:
+                await send_new_menu(update, context, "❌ Только администраторы могут завершить турнир.")
+                return
+                
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+            
+            ordered = get_standings(current_tournament['id'])
+            if not ordered or all(player[1]['P'] == 0 for player in ordered):
+                await send_new_menu(update, context, "❌ Нельзя завершить турнир без сыгранных матчей!")
+                return
+            
+            await send_new_menu(
+                update, context,
+                "🏁 Вы уверены, что хотите завершить турнир?\n\n"
+                "⚠️ После завершения турнир нельзя будет изменить!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Завершить турнир", callback_data="confirm_finish_tournament")],
+                    [InlineKeyboardButton("❌ Отмена", callback_data="main_menu")]
+                ])
+            )
+        
+        elif data == "confirm_finish_tournament":
+            if not user_is_admin:
+                await send_new_menu(update, context, "❌ Только администраторы могут завершить турнир.")
+                return
+                
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+            
+            # Получаем финальные результаты
+            ordered = get_standings(current_tournament['id'])
+            prize = get_current_tournament_prize(current_tournament['id'])
+            msg = format_table(current_tournament['id'], ordered)
+            
+            winner = ordered[0][0] if ordered else "Неизвестно"
+            
+            # Убираем текущий турнир
+            conn = db()
+            c = conn.cursor()
+            c.execute("DELETE FROM chat_current_tournament WHERE chat_id=?", (chat_id,))
+            conn.commit()
+            conn.close()
+            
+            await send_new_menu(
+                update, context,
+                f"🏁 ТУРНИР ЗАВЕРШЕН! 🏁\n\n"
+                f"🏆 Турнир: {current_tournament['name']}\n"
+                f"👑 ПОБЕДИТЕЛЬ: {winner}\n"
+                f"🎁 Приз: {prize}\n\n"
+                f"📊 ФИНАЛЬНАЯ ТАБЛИЦА:\n\n{msg}\n\n"
+                f"🎉 Поздравляем победителя!",
+                parse_mode=ParseMode.HTML
+            )
+            
+            # Отправляем отдельное сообщение с поздравлением
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text=f"🎊 {winner} забирает {prize}! Поздравляем! 🎊"
+            )
+        
+        elif data.startswith("edit_match_"):
+            match_id = int(data[11:])
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+
+            match = get_match_by_id(current_tournament['id'], match_id)
+            if not match:
+                await send_new_menu(update, context, "❌ Матч не найден.")
+                return
+
+            context.user_data['edit_match_id'] = match_id
+            context.user_data['edit_match'] = dict(match)
+            context.user_data['edit_match_scores'] = {}
+
+            no = match_no(match)
+            await send_new_menu(
+                update, context,
+                f"✏️ Редактирование матча #{no}: {match['home']} vs {match['away']}\n"
+                f"Текущий счет: {match['home_goals']}:{match['away_goals']}\n\n"
+                f"Новое количество голов для {match['home']}?",
+                reply_markup=get_score_keyboard(match_id, match['home'], is_edit=True)
+            )
+        
+        elif data.startswith("edit_score_"):
+            parts = data[11:].split("_", 3)
+            if len(parts) < 3:
+                await send_new_menu(update, context, "❌ Ошибка формата данных.")
+                return
+                
+            match_id = int(parts[0])
+            player_name = parts[1]
+            goals = int(parts[2])
+
+            match = context.user_data.get('edit_match')
+            if not match:
+                await send_new_menu(update, context, "❌ Ошибка: матч не выбран.")
+                return
+
+            if not current_tournament:
+                await send_new_menu(update, context, "❌ Нет выбранного турнира.")
+                return
+
+            context.user_data.setdefault('edit_match_scores', {})
+            context.user_data['edit_match_scores'][player_name] = goals
+
+            no = match_no(match)
+
+            if len(context.user_data['edit_match_scores']) == 1:
+                # Первый игрок - показываем форму для второго
+                other_player = match['away'] if player_name == match['home'] else match['home']
+                await send_new_menu(
+                    update, context,
+                    f"✏️ Редактирование матча #{no}: {match['home']} vs {match['away']}\n"
+                    f"✅ {player_name}: {goals} голов\n\n"
+                    f"Новое количество голов для {other_player}?",
+                    reply_markup=get_score_keyboard(match_id, other_player, is_edit=True)
+                )
+            else:
+                # Второй игрок - записываем результат и показываем итог
+                home_goals = context.user_data['edit_match_scores'].get(match['home'], 0)
+                away_goals = context.user_data['edit_match_scores'].get(match['away'], 0)
+
+                # Записываем новый результат
+                record_result(current_tournament['id'], match_id, home_goals, away_goals)
+
+                match_comment = get_funny_match_comment(home_goals, away_goals)
+                ordered = get_standings(current_tournament['id'])
+                prize = get_current_tournament_prize(current_tournament['id'])
+                msg = format_table(current_tournament['id'], ordered)
+
+                home = _html_escape(match['home'])
+                away = _html_escape(match['away'])
+                comment = _html_escape(match_comment)
+                old_score = f"{match['home_goals']}:{match['away_goals']}"
+
+                result_text = (
+                    f"✅ Результат изменен!\n"
+                    f"⚽ Матч #{no}: {home} {home_goals}:{away_goals} {away}\n"
+                    f"📝 Было: {old_score} → Стало: {home_goals}:{away_goals}\n\n"
+                    f"{comment}\n\n"
+                    f"{msg}"
+                )
+
+                await send_new_menu(update, context, result_text, parse_mode=ParseMode.HTML)
+
+                fun = get_funny_message(ordered, prize)
+                if fun:
+                    await context.bot.send_message(chat_id=chat_id, text=fun)
+
+                # Чистим состояние
+                context.user_data.pop('edit_match_id', None)
+                context.user_data.pop('edit_match', None)
+                context.user_data.pop('edit_match_scores', None)
+        
+        else:
+            await send_new_menu(update, context, f"❌ Неизвестная команда: {data}")
         
     except Exception as e:
         print(f"Ошибка в button_handler: {e}")
