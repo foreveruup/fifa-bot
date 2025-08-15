@@ -105,21 +105,23 @@ DRAW_COMMENTS = [
 
 TOURNAMENT_NAME, TOURNAMENT_ROUNDS, TOURNAMENT_PRIZE, ADD_PLAYER_NAME, ADD_PLAYERS_LIST = range(5)
 
-# Путь к базе данных в постоянной директории
 DB_PATH = os.getenv("LEAGUE_DB", "/app/data/league_v3.db")
 
-# Создаем директорию для базы данных если её нет
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     conn = db()
     c = conn.cursor()
-    # Таблица турниров - убираем поле active, теперь все турниры сохраняются
+
+    c.execute("PRAGMA journal_mode=WAL;")
+    c.execute("PRAGMA synchronous=NORMAL;")
+    c.execute("PRAGMA foreign_keys=ON;")
+
     c.execute("""
     CREATE TABLE IF NOT EXISTS tournaments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,7 +138,7 @@ def init_db():
         tournament_id INTEGER NOT NULL,
         name TEXT NOT NULL,
         club TEXT,
-        FOREIGN KEY(tournament_id) REFERENCES tournaments(id)
+        FOREIGN KEY(tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE
     );
     """)
     c.execute("""
@@ -149,30 +151,25 @@ def init_db():
         home_goals INTEGER,
         away_goals INTEGER,
         played INTEGER DEFAULT 0,
-        FOREIGN KEY(tournament_id) REFERENCES tournaments(id)
+        FOREIGN KEY(tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE
     );
     """)
-    
-    # Добавляем таблицу для текущего выбранного турнира в чате
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS chat_current_tournament (
-        chat_id INTEGER PRIMARY KEY,
-        tournament_id INTEGER,
-        FOREIGN KEY(tournament_id) REFERENCES tournaments(id)
-    );
-    """)
+
+    c.execute("CREATE INDEX IF NOT EXISTS idx_tournaments_chat ON tournaments(chat_id, created_at DESC);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_players_tid ON players(tournament_id);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_matches_tid ON matches(tournament_id);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_matches_tid_played ON matches(tournament_id, played, match_number);")
     
     c.execute("PRAGMA table_info(matches)")
     columns = [row[1] for row in c.fetchall()]
     if 'match_number' not in columns:
         c.execute("ALTER TABLE matches ADD COLUMN match_number INTEGER DEFAULT 0")
-        # Обновляем существующие записи
         c.execute("""
         UPDATE matches 
         SET match_number = id 
         WHERE match_number IS NULL OR match_number = 0
         """)
-    
+
     conn.commit()
     conn.close()
 
@@ -238,19 +235,18 @@ def match_no(row: sqlite3.Row) -> int:
 def add_tournament(chat_id: int, name: str, prize: str, rounds: int) -> int:
     conn = db()
     c = conn.cursor()
-    
-    # Просто создаем новый турнир, не удаляя старые
+
     c.execute("""
     INSERT INTO tournaments (chat_id, name, prize, rounds, created_at)
     VALUES (?, ?, ?, ?, ?)
     """, (chat_id, name, prize, rounds, datetime.now().isoformat()))
     tid = c.lastrowid
-    
-    # Устанавливаем новый турнир как текущий
-    set_current_tournament(chat_id, tid)
-    
+
     conn.commit()
     conn.close()
+
+    set_current_tournament(chat_id, tid)
+
     return tid
 
 # -------------------------
@@ -1239,12 +1235,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = nt.get('name', 'Турнир')
         rounds = nt.get('rounds', 2)
 
-        tid = add_tournament(chat_id, name, prize, rounds)
+        try:
+            add_tournament(chat_id, name, prize, rounds)
+        except Exception as e:
+        
+            context.user_data['stage'] = None
+            await update.message.reply_text(f"❌ Не удалось создать турнир: {e}")
+            return
 
-        # Очистим временные поля
         context.user_data['stage'] = None
         context.user_data.pop('new_tournament', None)
-
         await send_new_menu(
             update, context,
             f"✅ Турнир '{_html_escape(name)}' создан и выбран!\n"
