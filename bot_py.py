@@ -32,29 +32,42 @@ CLUBS_DB = {
     "England": [
         "Newcastle United", "Tottenham Hotspur", "Chelsea", "Arsenal", "Liverpool",
         "Manchester United", "Manchester City", "Aston Villa", "Crystal Palace",
-        "Brighton", "West Ham", "Nottingham Forest"
+        "Brighton", "West Ham United", "Nottingham Forest", "Bournemouth", "Leicester",
+        "Fullham", "Ipswich Town", "Southampton", "Wolverhampton", "Everton", "Brentford"
     ],
     "Italy": [
-        "AC Milan", "Inter Milan", "Juventus", "Napoli", "Roma", "Atalanta"
+        "AC Milan", "Inter Milan", "Juventus", "Napoli", "Roma", "Atalanta", "Como",
+        "Bologna", "Torino", "Parma", "Udinese", "Cagliari", "Lecce", "Monza", "Genoa",
+        "Hellas Verona FC", "Fiorentina"
     ],
     "Germany": [
-        "Leipzig", "Bayer Leverkusen", "Borussia Dortmund", "Bayern Munich",
-        "Frankfurt", "Stuttgart"
+        "Leipzig", "Bayer Leverkusen", "Borussia Dortmund", "Bayern Munich", "Mainz 05",
+        "Frankfurt", "Stuttgart", "Wolfsburg", "Werder Bremen", "Union Berlin", "Hoffenheim",
+        "Borussia Mönchengladbach", "SC Freiburg", "FC Augsburg"
     ],
     "Spain": [
         "Real Madrid", "Barcelona", "Atletico Madrid", "Athletic Bilbao", "Sevilla",
-        "Real Betis", "Real Sociedad", "Girona", "Villarreal"
+        "Real Betis", "Real Sociedad", "Girona", "Villarreal", "Valencia", "Las Palmas",
+        "Rayo Vallecano", "Osasuna", "RC Celta", "RCD Mallorca", "CD Leganés", "Deportivo Alavés",
+        "RCD Espanyol", "Getafe"
     ],
     "France": [
-        "Lyon", "Paris Saint-Germain", "Olympique de Marseille", "AS Monaco", "OGC Nice"
+        "Lyon", "Paris Saint-Germain", "Olympique de Marseille", "AS Monaco", "OGC Nice",
+        "Lille", "RC Lens", "Stade Rennais FC", "Montpellier", "Stade Brestois", "Toulouse FC",
+        "RC Strasbourg Alsace", "FC Nantes"
     ],
-    "Netherlands": ["Ajax", "PSV"],
-    "Turkey": ["Galatasaray", "Fenerbahçe", "Beşiktaş"],
+    "Netherlands": ["Ajax", "PSV", "Feyenoord"],
+    "Turkey": ["Galatasaray", "Fenerbahçe", "Beşiktaş", "Trabzonspor"],
     "Portugal": ["Benfica", "Sporting"],
-    "Saudi Arabia": ["Al Nassr", "Al Hilal", "Al Ittihad"],
+    "Saudi Arabia": ["Al Nassr", "Al Hilal", "Al Ittihad", "Al Ahli"],
+    "South America": ["River Plate", "Flamengo", "Botafogo", "Atlético Mineiro", "Palmeiras",
+                      "Fluminense", "Corinthians", "Vasco da Gama", "Boca Juniors"],
     "National teams": [
         "Spain", "Portugal", "Netherlands", "Germany", "Argentina", "France", "England",
         "Italy", "Japan", "South Korea", "Morocco", "Croatia", "Norway", "Sweden", "Denmark"
+    ],
+    "Other (Europe)": ["Olympiacos FC", "AEK Athens", "Celtic", "SK Slavia Praha", "Sparta Praha"
+        "Rangers FC", "Club Brugge", "RSC Anderlecht", "FC København", "PAOK", "Panathinaikos FC"
     ]
 }
 
